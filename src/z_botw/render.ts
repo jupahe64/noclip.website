@@ -1,7 +1,7 @@
 
 import { GfxDevice, GfxBufferUsage, GfxBuffer, GfxInputLayout, GfxFormat, GfxVertexAttributeFrequency, GfxBindingLayoutDescriptor, GfxProgram, GfxInputState, GfxVertexBufferDescriptor, GfxCompareMode, GfxRenderPass, GfxHostAccessPass, GfxBufferFrequencyHint, GfxTexture, GfxVertexAttributeDescriptor } from "../gfx/platform/GfxPlatform";
 import { makeStaticDataBuffer } from "../gfx/helpers/BufferHelpers";
-import { DeviceProgram } from "../Program";
+import { DeviceProgram, DeviceProgramReflection } from "../Program";
 import { assert, nArray } from "../util";
 import { AreaInfo } from "./tscb";
 import { mat4 } from "gl-matrix";
@@ -16,6 +16,7 @@ import { GX2TextureHolder } from "../fres/render";
 import { TextureMapping } from "../TextureHolder";
 import { TerrainManager } from "./tera";
 import { AABB } from "../Geometry";
+import { reverseDepthForCompareMode } from "../gfx/helpers/ReversedDepthHelpers";
 
 export interface Area {
     areaInfo: AreaInfo;
@@ -34,7 +35,9 @@ class TerrainProgram extends DeviceProgram {
     public static a_AreaLocalPosition = 3;
     public static a_GridAttributes = 4;
 
-    public both = readFileSync('src/z_botw/TerrainProgram.glsl', { encoding: 'utf8' });
+    private static program = readFileSync('src/z_botw/TerrainProgram.glsl', { encoding: 'utf8' });
+    public static programReflection: DeviceProgramReflection = DeviceProgram.parseReflectionDefinitions(TerrainProgram.program);
+    public both = TerrainProgram.program;
 }
 
 function buildGridMeshIndexBuffer(indexData: Uint16Array, i: number, x1: number, x2: number, y1: number, y2: number, stride: number): number {
@@ -188,7 +191,7 @@ export class TerrainRenderer {
 
     constructor(device: GfxDevice, textureHolder: GX2TextureHolder, private staticData: TerrainAreaRendererStatic, public viewRenderer: GfxRenderInstViewRenderer) {
         this.gfxProgram = device.createProgram(new TerrainProgram());
-        const programReflection = device.queryProgram(this.gfxProgram);
+        const programReflection = TerrainProgram.programReflection;
         const bindingLayouts: GfxBindingLayoutDescriptor[] = [
             { numUniformBuffers: 1, numSamplers: 2 },
             { numUniformBuffers: 0, numSamplers: 1 },
@@ -203,15 +206,13 @@ export class TerrainRenderer {
         this.templateRenderInst.setSamplerBindingsFromTextureMappings(textureMappings);
 
         this.templateRenderInst.setGfxProgram(this.gfxProgram);
-        this.templateRenderInst.setMegaStateFlags({ depthCompare: GfxCompareMode.LESS, depthWrite: true });
+        this.templateRenderInst.setMegaStateFlags({ depthCompare: reverseDepthForCompareMode(GfxCompareMode.LESS), depthWrite: true });
         this.renderInstBuilder.newUniformBufferInstance(this.templateRenderInst, TerrainProgram.ub_SceneParams);
         this.renderInstBuilder.finish(device, this.viewRenderer);
     }
 
     public prepareToRender(hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
         let offs: number;
-
-        viewerInput.camera.setClipPlanes(20, 5000000);
 
         // Compute view projection.
         mat4.mul(scratch, viewerInput.camera.projectionMatrix, viewerInput.camera.viewMatrix);

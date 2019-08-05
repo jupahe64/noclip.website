@@ -11,22 +11,21 @@ if (module.hot) {
     });
 }
 
-import { SceneDesc, SceneGroup, Viewer, SceneGfx, getSceneDescs, InitErrorCode, initializeViewer, makeErrorUI } from './viewer';
+import { Viewer, SceneGfx, InitErrorCode, initializeViewer, makeErrorUI } from './viewer';
 
 import ArrayBufferSlice from './ArrayBufferSlice';
-import Progressable from './Progressable';
 
 import * as Scenes_BanjoKazooie from './bk/scenes';
 import * as Scenes_THUG2 from './thug2/scenes';
 import * as Scenes_Zelda_TwilightPrincess from './j3d/ztp_scenes';
 import * as Scenes_MarioKartDoubleDash from './j3d/mkdd_scenes';
-import * as Scenes_Zelda_TheWindWaker from './j3d/zww_scenes';
+import * as Scenes_Zelda_TheWindWaker from './j3d/WindWaker/zww_scenes';
 import * as Scenes_SuperMarioSunshine from './j3d/sms_scenes';
 import * as Scenes_Pikmin2 from './j3d/pik2_scenes';
 import * as Scenes_SuperMarioGalaxy1 from './j3d/smg/smg1_scenes';
 import * as Scenes_SuperMarioGalaxy2 from './j3d/smg/smg2_scenes';
 import * as Scenes_SuperMario64DS from './sm64ds/scenes';
-import * as Scenes_SonicMania from './mdl0/scenes';
+import * as Scenes_SonicMania from './sonic_mania/scenes';
 import * as Scenes_Zelda_OcarinaOfTime3D from './oot3d/oot3d_scenes';
 import * as Scenes_Zelda_MajorasMask3D from './oot3d/mm3d_scenes';
 import * as Scenes_LuigisMansion3D from './oot3d/lm3d_scenes';
@@ -46,7 +45,6 @@ import * as Scenes_Psychonauts from './psychonauts/scenes';
 import * as Scenes_DarkSouls from './dks/scenes';
 import * as Scenes_KatamariDamacy from './katamari_damacy/scenes';
 import * as Scenes_PaperMario64 from './pm64/scenes';
-
 import * as Scenes_Elebits from './rres/Scenes_Elebits';
 import * as Scenes_KirbysReturnToDreamLand from './rres/Scenes_KirbysReturnToDreamLand';
 import * as Scenes_Klonoa from './rres/Scenes_Klonoa';
@@ -58,15 +56,15 @@ import * as Scenes_SuperSmashBrosBrawl from './rres/Scenes_SuperSmashBrosBrawl';
 import * as Scenes_Test from './Scenes_Test';
 import * as Scenes_WiiSportsResort from './rres/Scenes_WiiSportsResort';
 import * as Scenes_Zelda_SkywardSword from './rres/Scenes_Zelda_SkywardSword';
+import * as Scenes_InteractiveExamples from './interactive_examples/Scenes';
 
 import { DroppedFileSceneDesc } from './Scenes_FileDrops';
 
-import { UI, SaveStatesAction, FloatingPanel, RENDER_HACKS_ICON, Slider } from './ui';
+import { UI, SaveStatesAction, Panel } from './ui';
 import { serializeCamera, deserializeCamera, FPSCameraController } from './Camera';
-import { hexdump, assert } from './util';
-import { downloadBlob, downloadBufferSlice, downloadBuffer } from './fetch';
+import { hexdump } from './util';
+import { DataFetcher } from './DataFetcher';
 import { ZipFileEntry, makeZipFile } from './ZipFile';
-import { TextureHolder } from './TextureHolder';
 import { atob, btoa } from './Ascii85';
 import { vec3, mat4 } from 'gl-matrix';
 import { GlobalSaveManager, SaveStateLocation } from './SaveManager';
@@ -77,6 +75,9 @@ import { standardFullClearRenderPassDescriptor } from './gfx/helpers/RenderTarge
 
 import * as Sentry from '@sentry/browser';
 import { GIT_REVISION, IS_DEVELOPMENT } from './BuildVersion';
+import { SceneDesc, SceneGroup, SceneContext, getSceneDescs, ProgressMeter, Destroyable } from './SceneBase';
+import { prepareFrameDebugOverlayCanvas2D } from './DebugJunk';
+import { downloadBlob, downloadBufferSlice, downloadBuffer } from './DownloadUtils';
 
 const sceneGroups = [
     "Wii",
@@ -127,57 +128,12 @@ const sceneGroups = [
     Scenes_Splatoon.sceneGroup,
     Scenes_THUG2.sceneGroup,
     Scenes_Zelda_BreathOfTheWild.sceneGroup,
+    Scenes_Test.sceneGroup,
+    Scenes_InteractiveExamples.sceneGroup,
 ];
-
-if (IS_DEVELOPMENT)
-    sceneGroups.push(Scenes_Test.sceneGroup);
 
 function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
     return new Response(blob).arrayBuffer();
-}
-
-class SceneLoader {
-    public loadingSceneDesc: SceneDesc = null;
-    public abortController: AbortController | null = null;
-
-    constructor(public viewer: Viewer) {
-    }
-
-    public loadSceneDesc(sceneDesc: SceneDesc): Progressable<SceneGfx> {
-        this.viewer.setScene(null);
-        gfxDeviceGetImpl(this.viewer.gfxDevice).checkForLeaks();
-
-        if (this.abortController !== null)
-            this.abortController.abort();
-        this.abortController = new AbortController();
-
-        this.loadingSceneDesc = sceneDesc;
-
-        let progressable: Progressable<SceneGfx> | null = null;
-
-        if (sceneDesc.createScene !== undefined) {
-            progressable = sceneDesc.createScene(this.viewer.gfxDevice, this.abortController.signal);
-        } else if (sceneDesc.createScene2 !== undefined) {
-            // TODO(jstpierre): This is a bit of an ugly hack until we can split out ProgressMeter from Progressable.
-            progressable = new Progressable<SceneGfx>(null);
-            const promise = sceneDesc.createScene2(this.viewer.gfxDevice, this.abortController.signal, progressable);
-            progressable.promise = promise;
-        }
-
-        if (progressable !== null) {
-            progressable.then((scene: SceneGfx) => {
-                if (this.loadingSceneDesc === sceneDesc) {
-                    this.loadingSceneDesc = null;
-                    this.abortController = null;
-                    this.viewer.setScene(scene);
-                }
-            });
-            return progressable;
-        }
-
-        console.error(`Cannot load ${sceneDesc.id}. Probably an unsupported file extension.`);
-        throw "whoops";
-    }
 }
 
 function convertCanvasToPNG(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -210,14 +166,12 @@ class Main {
 
     private droppedFileGroup: SceneGroup;
 
-    private uiContainers: HTMLElement;
-    private dragHighlight: HTMLElement;
-    private floatingPanelContainer: HTMLElement;
-    private debugFloater: FloatingPanel | null = null;
     private currentSceneGroup: SceneGroup;
     private currentSceneDesc: SceneDesc;
 
-    private sceneLoader: SceneLoader;
+    private loadingSceneDesc: SceneDesc = null;
+    private abortController: AbortController | null = null;
+    private destroyablePool: Destroyable[] = [];
 
     constructor() {
         this.toplevel = document.createElement('div');
@@ -225,21 +179,18 @@ class Main {
 
         this.canvas = document.createElement('canvas');
 
-        this.uiContainers = document.createElement('div');
-        this.toplevel.appendChild(this.uiContainers);
-
         const errorCode = initializeViewer(this, this.canvas);
         if (errorCode !== InitErrorCode.SUCCESS) {
-            this.uiContainers.appendChild(makeErrorUI(errorCode));
+            this.toplevel.appendChild(makeErrorUI(errorCode));
             return;
         }
 
         this.toplevel.ondragover = (e) => {
-            this.dragHighlight.style.display = 'block';
+            this.ui.dragHighlight.style.display = 'block';
             e.preventDefault();
         };
         this.toplevel.ondragleave = (e) => {
-            this.dragHighlight.style.display = 'none';
+            this.ui.dragHighlight.style.display = 'none';
             e.preventDefault();
         };
         this.toplevel.ondrop = this._onDrop.bind(this);
@@ -257,8 +208,6 @@ class Main {
         this.viewer.inputManager.onisdraggingchanged = () => {
             this.ui.setIsDragging(this.viewer.inputManager.isDragging());
         };
-
-        this.sceneLoader = new SceneLoader(this.viewer);
 
         this._makeUI();
 
@@ -354,6 +303,8 @@ class Main {
     private _updateLoop = (time: number) => {
         this.checkKeyShortcuts();
 
+        prepareFrameDebugOverlayCanvas2D();
+
         // Needs to be called before this.viewer.update
         const shouldTakeScreenshot = this.viewer.inputManager.isKeyDownEventTriggered('Numpad7');
 
@@ -371,7 +322,7 @@ class Main {
     };
 
     private _onDrop(e: DragEvent) {
-        this.dragHighlight.style.display = 'none';
+        this.ui.dragHighlight.style.display = 'none';
         e.preventDefault();
         const transfer = e.dataTransfer;
         if (transfer.files.length === 0)
@@ -467,7 +418,7 @@ class Main {
             return this._loadSceneSaveStateVersion1(state);
     }
 
-    private _loadSceneDescById(id: string, sceneState: string | null): Progressable<SceneGfx> | null {
+    private _loadSceneDescById(id: string, sceneState: string | null): void {
         const [groupId, ...sceneRest] = id.split('/');
         let sceneId = decodeURIComponent(sceneRest.join('/'));
 
@@ -479,7 +430,7 @@ class Main {
             sceneId = group.sceneIdMap.get(sceneId);
 
         const desc = getSceneDescs(group).find((d) => d.id === sceneId);
-        return this._loadSceneDesc(group, desc, sceneState);
+        this._loadSceneDesc(group, desc, sceneState);
     }
 
     private _loadState(state: string) {
@@ -523,7 +474,10 @@ class Main {
             this._saveState();
         };
 
-        this.ui.setScene(scene);
+        let scenePanels: Panel[] = [];
+        if (scene.createPanels)
+            scenePanels = scene.createPanels();
+        this.ui.setScenePanels(scenePanels);
 
         const sceneDescId = this._getCurrentSceneDescId();
         this.saveManager.setCurrentSceneDescId(sceneDescId);
@@ -569,22 +523,58 @@ class Main {
         }
     }
 
-    private _loadSceneDesc(sceneGroup: SceneGroup, sceneDesc: SceneDesc, sceneStateStr: string | null = null): Progressable<SceneGfx> {
+    private _loadSceneDesc(sceneGroup: SceneGroup, sceneDesc: SceneDesc, sceneStateStr: string | null = null): void {
         if (this.currentSceneDesc === sceneDesc)
-            return Progressable.resolve(null);
+            return;
+
+        const device = this.viewer.gfxDevice;
+
+        // Tear down old scene.
+        if (this.abortController !== null)
+            this.abortController.abort();
+        this.ui.destroyScene();
+        this.viewer.setScene(null);
+        for (let i = 0; i < this.destroyablePool.length; i++)
+            this.destroyablePool[i].destroy(device);
+        this.abortController = new AbortController();
+        gfxDeviceGetImpl(this.viewer.gfxDevice).checkForLeaks();
+
+        // Unhide any hidden scene groups upon being loaded.
+        if (sceneGroup.hidden)
+            sceneGroup.hidden = false;
 
         this.currentSceneGroup = sceneGroup;
         this.currentSceneDesc = sceneDesc;
         this.ui.sceneSelect.setCurrentDesc(this.currentSceneGroup, this.currentSceneDesc);
 
-        const progressable = this.sceneLoader.loadSceneDesc(sceneDesc).then((scene) => {
-            this._onSceneChanged(scene, sceneStateStr);
-            return scene;
-        });
-        this.ui.sceneSelect.setLoadProgress(progressable.progress);
-        progressable.onProgress = () => {
-            this.ui.sceneSelect.setLoadProgress(progressable.progress);
+        this.ui.sceneSelect.setProgress(0);
+
+        const abortSignal = this.abortController.signal;
+        const progressMeter = this.ui.sceneSelect;
+        const dataFetcher = new DataFetcher(abortSignal, progressMeter);
+        const uiContainer: HTMLElement = document.createElement('div');
+        this.ui.sceneUIContainer.appendChild(uiContainer);
+        const destroyablePool: Destroyable[] = this.destroyablePool;
+        const context: SceneContext = {
+            device, dataFetcher, uiContainer, destroyablePool,
         };
+
+        this.loadingSceneDesc = sceneDesc;
+        const promise = sceneDesc.createScene(device, context);
+
+        if (promise === null) {
+            console.error(`Cannot load ${sceneDesc.id}. Probably an unsupported file extension.`);
+            throw "whoops";
+        }
+
+        promise.then((scene: SceneGfx) => {
+            if (this.loadingSceneDesc === sceneDesc) {
+                this.loadingSceneDesc = null;
+                this.abortController = null;
+                this.viewer.setScene(scene);
+                this._onSceneChanged(scene, sceneStateStr);
+            }
+        });
 
         // Set window title.
         document.title = `${sceneDesc.name} - ${sceneGroup.name} - noclip`;
@@ -602,12 +592,10 @@ class Main {
             category: 'loadScene',
             message: sceneDescId,
         });
-        
+
         Sentry.configureScope((scope) => {
             scope.setExtra('sceneDescId', sceneDescId);
         });
-
-        return progressable;
     }
 
     private _loadSceneGroups() {
@@ -616,7 +604,7 @@ class Main {
 
     private _makeUI() {
         this.ui = new UI(this.viewer);
-        this.uiContainers.appendChild(this.ui.elem);
+        this.toplevel.appendChild(this.ui.elem);
         this.ui.sceneSelect.onscenedescselected = this._onSceneDescSelected.bind(this);
         this.ui.saveStatesPanel.onsavestatesaction = (action: SaveStatesAction, key: string) => {
             this.doSaveStatesAction(action, key);
@@ -628,83 +616,10 @@ class Main {
             this.viewer.setSceneTime(0);
             this._saveState();
         };
-
-        this.dragHighlight = document.createElement('div');
-        this.uiContainers.appendChild(this.dragHighlight);
-        this.dragHighlight.style.position = 'absolute';
-        this.dragHighlight.style.left = '0';
-        this.dragHighlight.style.right = '0';
-        this.dragHighlight.style.top = '0';
-        this.dragHighlight.style.bottom = '0';
-        this.dragHighlight.style.backgroundColor = 'rgba(255, 255, 255, 0.5)';
-        this.dragHighlight.style.boxShadow = '0 0 40px 5px white inset';
-        this.dragHighlight.style.display = 'none';
-        this.dragHighlight.style.pointerEvents = 'none';
-
-        this.floatingPanelContainer = document.createElement('div');
-        this.uiContainers.appendChild(this.floatingPanelContainer);
-    }
-
-    private makeFloater(title: string = 'Floating Panel', icon: string = RENDER_HACKS_ICON): FloatingPanel {
-        const panel = new FloatingPanel();
-        panel.setWidth(600);
-        panel.setTitle(icon, title);
-        this.floatingPanelContainer.appendChild(panel.elem);
-        return panel;
-    }
-
-    private getDebugFloater(): FloatingPanel {
-        if (this.debugFloater === null)
-            this.debugFloater = this.makeFloater('Debug');
-        return this.debugFloater;
-    }
-
-    public bindSlider(obj: { [k: string]: number }, paramName: string, min = 0, max = 1, labelName: string = paramName, panel: FloatingPanel | null = null): void {
-        let value = obj[paramName];
-        assert(typeof value === "number");
-
-        if (panel === null)
-            panel = this.getDebugFloater();
-
-        const slider = new Slider();
-        slider.onvalue = (newValue: number) => {
-            obj[paramName] = newValue;
-            window.debugObj = obj;
-            update();
-        };
-        update();
-
-        function update() {
-            value = obj[paramName];
-            slider.setLabel(`${labelName} = ${value.toFixed(2)}`);
-            min = Math.min(value, min);
-            max = Math.max(value, max);
-            slider.setRange(min, max);
-            slider.setValue(value);
-        }
-
-        setInterval(() => {
-            if (obj[paramName] !== value)
-                update();
-        }, 100);
-
-        panel.contents.appendChild(slider.elem);
-    }
-
-    public bindSliders(obj: { [k: string]: any }, parentName: string = '', panel: FloatingPanel | null = null): void {
-        for (const keyName in obj) {
-            const v = obj[keyName];
-            if (typeof v === "number")
-                this.bindSlider(obj, keyName, 0, 1, `${parentName}.${keyName}`, panel);
-            if (v instanceof Float32Array)
-                this.bindSliders(v, `${parentName}.${keyName}`, panel);
-        }
-        
-        window.debugObj = obj;
     }
 
     private _toggleUI() {
-        this.uiContainers.style.display = this.uiContainers.style.display === 'none' ? '' : 'none';
+        this.ui.elem.style.display = this.ui.elem.style.display === 'none' ? '' : 'none';
     }
 
     private _getSceneDownloadPrefix() {
@@ -720,11 +635,12 @@ class Main {
         convertCanvasToPNG(canvas).then((blob) => downloadBlob(filename, blob));
     }
 
-    private _makeZipFileFromTextureHolder(textureHolder: TextureHolder<any>): Promise<ZipFileEntry[]> {
+    private _makeTextureZipFile(): Promise<ZipFileEntry[]> | null {
+        const viewerTextures = this.ui.textureViewer.getViewerTextureList();
         const zipFileEntries: ZipFileEntry[] = [];
         const promises: Promise<void>[] = [];
-        for (let i = 0; i < textureHolder.viewerTextures.length; i++) {
-            const tex = textureHolder.viewerTextures[i];
+        for (let i = 0; i < viewerTextures.length; i++) {
+            const tex = viewerTextures[i];
             for (let j = 0; j < tex.surfaces.length; j++) {
                 const filename = `${tex.name}_${j}.png`;
                 promises.push(convertCanvasToPNG(tex.surfaces[j]).then((blob) => blobToArrayBuffer(blob)).then((data) => {
@@ -737,14 +653,14 @@ class Main {
     }
 
     private _downloadTextures() {
-        const textureHolder = this.viewer.getCurrentTextureHolder();
-        if (textureHolder) {
-            this._makeZipFileFromTextureHolder(textureHolder).then((zipFileEntries) => {
-                const zipBuffer = makeZipFile(zipFileEntries);
-                const filename = `${this._getSceneDownloadPrefix()}_Textures.zip`;
-                downloadBufferSlice(filename, new ArrayBufferSlice(zipBuffer), 'application/zip');
-            });
-        }
+        this._makeTextureZipFile().then((zipFileEntries) => {
+            if (zipFileEntries.length === 0)
+                return;
+
+            const zipBuffer = makeZipFile(zipFileEntries);
+            const filename = `${this._getSceneDownloadPrefix()}_Textures.zip`;
+            downloadBuffer(filename, zipBuffer, 'application/zip');
+        });
     }
 
     // Hooks for people who want to mess with stuff.

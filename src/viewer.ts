@@ -1,7 +1,6 @@
 
 import * as UI from './ui';
 
-import Progressable, { ProgressMeter } from './Progressable';
 import InputManager from './InputManager';
 import { CameraController, Camera, CameraControllerClass } from './Camera';
 import { TextureHolder } from './TextureHolder';
@@ -104,7 +103,7 @@ export class Viewer {
         // Hack in projection for now until we have that unfolded from RenderState.
         camera.newFrame();
         const aspect = this.canvas.width / this.canvas.height;
-        camera.setPerspective(this.fovY, aspect, 10, 50000);
+        camera.setPerspective(this.fovY, aspect, 10);
 
         this.viewerRenderInput.time = this.sceneTime;
         this.viewerRenderInput.viewportWidth = this.canvas.width;
@@ -209,31 +208,10 @@ export class Viewer {
 
         return canvas;
     }
-
-    public getCurrentTextureHolder(): TextureHolder<any> | null {
-        if (this.scene !== null && this.scene.textureHolder !== undefined)
-            return this.scene.textureHolder;
-        return null;
-    }
 }
 
-export interface SceneDesc {
-    id: string;
-    name: string;
-    createScene?(device: GfxDevice, abortSignal: AbortSignal): Progressable<SceneGfx>;
-    createScene2?(device: GfxDevice, abortSignal: AbortSignal, progressMeter: ProgressMeter): PromiseLike<SceneGfx>;
-}
-
-export interface SceneGroup {
-    id: string;
-    name: string;
-    sceneDescs: (string | SceneDesc)[];
-    sceneIdMap?: Map<string, string>;
-}
-
-export function getSceneDescs(sceneGroup: SceneGroup): SceneDesc[] {
-    return sceneGroup.sceneDescs.filter((g) => typeof g !== 'string') as SceneDesc[];
-}
+import { SceneDesc, SceneGroup } from "./SceneBase"
+export { SceneDesc, SceneGroup };
 
 interface ViewerOut {
     viewer: Viewer;

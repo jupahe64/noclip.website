@@ -8,7 +8,7 @@ import * as RARC from '../../j3d/rarc';
 import * as JPA from '../JPA';
 import { Color } from "../../gx/gx_material";
 import { vec3, mat4 } from "gl-matrix";
-import { GXRenderHelperGfx } from "../../gx/gx_render_2";
+import { GXRenderHelperGfx } from "../../gx/gx_render";
 import { colorNewCopy, White, colorCopy } from "../../Color";
 import { computeModelMatrixR } from "../../MathHelpers";
 import { DrawType } from "./NameObj";
@@ -16,6 +16,7 @@ import { DrawType } from "./NameObj";
 export class ParticleResourceHolder {
     private effectNames: string[];
     private jpac: JPA.JPAC;
+    private jpacData: JPA.JPACData;
     private resourceDatas = new Map<number, JPA.JPAResourceData>();
     public autoEffectList: JMapInfoIter;
 
@@ -28,6 +29,7 @@ export class ParticleResourceHolder {
 
         const jpacData = effectArc.findFileData(`Particles.jpc`);
         this.jpac = JPA.parse(jpacData);
+        this.jpacData = new JPA.JPACData(this.jpac);
     }
 
     public getUserIndex(name: string): number {
@@ -45,7 +47,7 @@ export class ParticleResourceHolder {
 
         const device = sceneObjHolder.modelCache.device;
         if (!this.resourceDatas.has(idx)) {
-            const resData = new JPA.JPAResourceData(device, this.jpac, this.jpac.effects[idx]);
+            const resData = new JPA.JPAResourceData(device, this.jpacData, this.jpac.effects[idx]);
             resData.name = name;
             this.resourceDatas.set(idx, resData);
         }
@@ -53,6 +55,7 @@ export class ParticleResourceHolder {
     }
 
     public destroy(device: GfxDevice): void {
+        this.jpacData.destroy(device);
         for (const [, resourceData] of this.resourceDatas.entries())
             resourceData.destroy(device);
     }
@@ -185,6 +188,8 @@ export function setupMultiEmitter(m: MultiEmitter, autoEffectIter: JMapInfoIter)
     const drawOrder = autoEffectIter.getValueString('DrawOrder');
     if (drawOrder === 'AFTER_INDIRECT')
         m.setDrawOrder(DrawType.EFFECT_DRAW_AFTER_INDIRECT);
+    else if (drawOrder === 'INDIRECT')
+        m.setDrawOrder(DrawType.EFFECT_DRAW_INDIRECT);
     else if (drawOrder === '3D')
         m.setDrawOrder(DrawType.EFFECT_DRAW_3D);
     else if (drawOrder === 'BLOOM_EFFECT')
@@ -641,8 +646,8 @@ export class EffectSystem {
 
     public createSingleEmitter(singleEmitter: SingleEmitter): void {
         if (singleEmitter.isValid()) {
-            // if (!singleEmitter.isOneTime())
-            //     return;
+            if (!singleEmitter.isOneTime())
+                return;
             singleEmitter.unlink();
         }
     

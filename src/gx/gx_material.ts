@@ -10,6 +10,7 @@ import { GfxCompareMode, GfxFrontFaceMode, GfxBlendMode, GfxBlendFactor, GfxCull
 import { vec3, vec4, mat4 } from 'gl-matrix';
 import { Camera } from '../Camera';
 import { assert } from '../util';
+import { reverseDepthForCompareMode } from '../gfx/helpers/ReversedDepthHelpers';
 
 // TODO(jstpierre): Move somewhere better...
 export const EFB_WIDTH = 640;
@@ -387,12 +388,13 @@ export class GX_Program extends DeviceProgram {
     }
 
     private generateLightAttnFn(chan: ColorChannelControl, lightName: string) {
-        const cosAttn = `ApplyCubic(${lightName}.CosAtten.xyz, dot(t_LightDeltaDir, ${lightName}.Direction.xyz))`;
+        const attn = `dot(t_LightDeltaDir, ${lightName}.Direction.xyz)`;
+        const cosAttn = `ApplyCubic(${lightName}.CosAtten.xyz, ${attn})`;
 
         switch (chan.attenuationFunction) {
         case GX.AttenuationFunction.NONE: return `1.0`;
         case GX.AttenuationFunction.SPOT: return `max(${cosAttn} / max(dot(${lightName}.DistAtten.xyz, vec3(1.0, t_LightDeltaDist2, t_LightDeltaDist)), 0.0), 0.0)`;
-        case GX.AttenuationFunction.SPEC: return `1.0`; // TODO(jtspierre): Specular
+        case GX.AttenuationFunction.SPEC: return `max(${cosAttn} / ApplyCubic(${lightName}.DistAtten.xyz, ${attn}), 0.0)`;
         }
     }
 
@@ -1255,7 +1257,7 @@ function translateCompareType(compareType: GX.CompareType): GfxCompareMode {
 export function translateGfxMegaState(megaState: Partial<GfxMegaStateDescriptor>, material: GXMaterial) {
     megaState.cullMode = translateCullMode(material.cullMode);
     megaState.depthWrite = material.ropInfo.depthWrite;
-    megaState.depthCompare = material.ropInfo.depthTest ? translateCompareType(material.ropInfo.depthFunc) : GfxCompareMode.ALWAYS;
+    megaState.depthCompare = material.ropInfo.depthTest ? reverseDepthForCompareMode(translateCompareType(material.ropInfo.depthFunc)) : GfxCompareMode.ALWAYS;
     megaState.frontFace = GfxFrontFaceMode.CW;
 
     if (material.ropInfo.blendMode.type === GX.BlendMode.NONE) {

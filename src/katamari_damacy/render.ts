@@ -11,6 +11,7 @@ import { TextureHolder, LoadedTexture, TextureMapping } from "../TextureHolder";
 import { nArray, assert } from "../util";
 import { GfxRenderInstManager } from "../gfx/render/GfxRenderer2";
 import { GfxRenderCache } from "../gfx/render/GfxRenderCache";
+import { reverseDepthForCompareMode } from "../gfx/helpers/ReversedDepthHelpers";
 
 export class KatamariDamacyProgram extends DeviceProgram {
     public static a_Position = 0;
@@ -112,7 +113,7 @@ void main() {
     // Basic fake directional.
     vec3 t_LightDirection = normalize(vec3(0.8, -1, 0.5));
     float t_LightIntensity = max(dot(-v_Normal, t_LightDirection), 0.0);
-    t_Color.rgb *= mix(0.7, 1.0, t_LightIntensity);
+    t_Color.rgb *= mix(0.7, 1.3, t_LightIntensity);
 
 ${this.generateAlphaTest(ate, atst, aref, afail)}
 
@@ -151,7 +152,6 @@ export class BINModelData {
     public destroy(device: GfxDevice): void {
         device.destroyBuffer(this.vertexBuffer);
         device.destroyBuffer(this.indexBuffer);
-        device.destroyInputLayout(this.inputLayout);
         device.destroyInputState(this.inputState);
     }
 }
@@ -217,7 +217,7 @@ export class BINModelPartInstance {
         assert(zte);
 
         this.megaStateFlags = {
-            depthCompare: translateDepthCompareMode(ztst),
+            depthCompare: reverseDepthForCompareMode(translateDepthCompareMode(ztst)),
         };
 
         if (this.binModelPart.textureName !== null) {
@@ -300,12 +300,12 @@ export class BINModelInstance {
         this.visible = visible;
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, textureHolder: KatamariDamacyTextureHolder, viewRenderer: Viewer.ViewerRenderInput) {
+    public prepareToRender(renderInstManager: GfxRenderInstManager, textureHolder: KatamariDamacyTextureHolder, viewRenderer: Viewer.ViewerRenderInput) {
         if (!this.visible)
             return;
 
         const template = renderInstManager.pushTemplateRenderInst();
-        template.setInputState(device, this.binModelData.inputState);
+        template.setInputLayoutAndState(this.binModelData.inputLayout, this.binModelData.inputState);
         template.setMegaStateFlags(cullModeFlags);
 
         computeViewMatrix(scratchMat4, viewRenderer.camera);

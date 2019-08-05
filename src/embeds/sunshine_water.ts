@@ -2,9 +2,8 @@
 import { mat4 } from 'gl-matrix';
 
 import ArrayBufferSlice from '../ArrayBufferSlice';
-import Progressable from '../Progressable';
 
-import { fetchData } from '../fetch';
+import { DataFetcher } from '../DataFetcher';
 import { SceneGfx, ViewerRenderInput } from '../viewer';
 
 import * as GX from '../gx/gx_enum';
@@ -15,8 +14,8 @@ import * as RARC from '../j3d/rarc';
 import { BMDModel, MaterialInstance, MaterialInstanceState, ShapeInstanceState, MaterialData } from '../j3d/render';
 import { SunshineRenderer, SunshineSceneDesc, SMSPass } from '../j3d/sms_scenes';
 import * as Yaz0 from '../compression/Yaz0';
-import { ub_PacketParams, PacketParams, u_PacketParamsBufferSize, fillPacketParamsData, ub_MaterialParams, u_MaterialParamsBufferSize } from '../gx/gx_render';
-import { GXRenderHelperGfx } from '../gx/gx_render_2';
+import { ub_PacketParams, PacketParams, u_PacketParamsBufferSize, fillPacketParamsData, ub_MaterialParams } from '../gx/gx_render';
+import { GXRenderHelperGfx } from '../gx/gx_render';
 import AnimationController from '../AnimationController';
 import { GfxDevice, GfxHostAccessPass, GfxBuffer, GfxInputState, GfxInputLayout, GfxBufferUsage, GfxVertexAttributeDescriptor, GfxFormat, GfxVertexAttributeFrequency, GfxVertexBufferDescriptor } from '../gfx/platform/GfxPlatform';
 import { makeStaticDataBuffer } from '../gfx/helpers/BufferHelpers';
@@ -24,6 +23,7 @@ import { makeSortKey, GfxRendererLayer } from '../gfx/render/GfxRenderer';
 import { makeTriangleIndexBuffer, GfxTopology } from '../gfx/helpers/TopologyHelpers';
 import { computeViewMatrix } from '../Camera';
 import { GfxRenderCache } from '../gfx/render/GfxRenderCache';
+import { SceneContext } from '../SceneBase';
 
 const scale = 200;
 const posMtx = mat4.create();
@@ -102,7 +102,6 @@ class PlaneShape {
         device.destroyBuffer(this.vtxBuffer);
         device.destroyBuffer(this.idxBuffer);
         device.destroyBuffer(this.zeroBuffer);
-        device.destroyInputLayout(this.inputLayout);
         device.destroyInputState(this.inputState);
     }
 }
@@ -141,6 +140,8 @@ class SeaPlaneScene {
         this.seaMaterialInstance = new MaterialInstance(seaMaterialData, {});
         this.seaMaterialInstance.bindTTK1(this.animationController, btk.ttk1);
         this.plane = new PlaneShape(device, cache);
+
+        this.shapeInstanceState.worldToViewMatrix = scratchViewMatrix;
     }
 
     public mangleMaterial(material: MaterialEntry, configName: string): void {
@@ -190,8 +191,8 @@ class SeaPlaneScene {
         this.seaMaterialInstance.setOnRenderInst(device, renderHelper.renderInstManager.gfxRenderCache, template);
         template.allocateUniformBuffer(ub_MaterialParams, this.seaMaterialInstance.materialHelper.materialParamsBufferSize);
 
-        computeViewMatrix(packetParams.u_PosMtx[0], viewerInput.camera);
-        mat4.mul(packetParams.u_PosMtx[0], packetParams.u_PosMtx[0], this.modelMatrix);
+        computeViewMatrix(this.shapeInstanceState.worldToViewMatrix, viewerInput.camera);
+        mat4.mul(packetParams.u_PosMtx[0], this.shapeInstanceState.worldToViewMatrix, this.modelMatrix);
 
         this.seaMaterialInstance.fillMaterialParams(template, this.materialInstanceState, this.shapeInstanceState.worldToViewMatrix, this.modelMatrix, viewerInput.camera, packetParams);
 
@@ -216,8 +217,11 @@ class SeaRenderer extends SunshineRenderer {
     }
 }
 
-export function createScene(device: GfxDevice, name: string): Progressable<SceneGfx> {
-    return fetchData("j3d/sms/dolpic0.szs", null).then((buffer: ArrayBufferSlice) => {
+export function createScene(context: SceneContext, name: string): Promise<SceneGfx> {
+    const device = context.device;
+    const dataFetcher = context.dataFetcher;
+
+    return dataFetcher.fetchData("j3d/sms/dolpic0.szs").then((buffer: ArrayBufferSlice) => {
         return Yaz0.decompress(buffer);
     }).then((buffer: ArrayBufferSlice) => {
         const rarc = RARC.parse(buffer);

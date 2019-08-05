@@ -2,10 +2,8 @@
 // Parse uniform buffer definitions, and provide helpers for filling them...
 
 import { Color } from "../../Color";
-import { mat4, mat2d, vec3 } from "gl-matrix";
-import { GfxBuffer, GfxHostAccessPass, GfxBufferBinding } from "../platform/GfxPlatform";
-import { assert, assertExists } from "../../util";
-import { GfxRenderBuffer } from "../render/GfxRenderBuffer";
+import { mat4, mat2d, vec3, vec4 } from "gl-matrix";
+import { assertExists } from "../../util";
 
 function findall(haystack: string, needle: RegExp): RegExpExecArray[] {
     const results: RegExpExecArray[] = [];
@@ -85,48 +83,6 @@ export function parseShaderSource(uniformBufferLayouts: StructLayout[], shaderSo
     }
 }
 
-// TODO(jstpierre): I'm not sure I like this class.
-export class BufferFillerHelper {
-    private offs: number;
-    public d: Float32Array;
-
-    constructor(public bufferLayout: StructLayout, d: Float32Array | null = null, public startOffs: number = 0) {
-        if (d !== null)
-            this.d = d;
-        else
-            this.d = new Float32Array(bufferLayout.totalWordSize);
-    }
-
-    public reset(): void {
-        this.offs = this.startOffs;
-    }
-
-    public getBufferBinding(buffer: GfxBuffer): GfxBufferBinding {
-        return { buffer, wordOffset: this.startOffs, wordCount: this.bufferLayout.totalWordSize };
-    }
-
-    public endAndUpload(hostAccessPass: GfxHostAccessPass, gfxBuffer: GfxRenderBuffer, dstWordOffset: number = 0): void {
-        assert(this.offs === this.bufferLayout.totalWordSize);
-        gfxBuffer.uploadSubData(hostAccessPass, dstWordOffset, this.d);
-    }
-
-    public fillVec4(v0: number, v1: number = 0, v2: number = 0, v3: number = 0): void {
-        this.offs += fillVec4(this.d, this.offs, v0, v1, v2, v3);
-    }
-
-    public fillColor(c: Color): void {
-        this.offs += fillColor(this.d, this.offs, c);
-    }
-
-    public fillMatrix4x4(m: mat4): void {
-        this.offs += fillMatrix4x4(this.d, this.offs, m);
-    }
-
-    public fillMatrix4x3(m: mat4): void {
-        this.offs += fillMatrix4x3(this.d, this.offs, m);
-    }
-}
-
 export function fillVec3(d: Float32Array, offs: number, v: vec3, v3: number = 0): number {
     d[offs + 0] = v[0];
     d[offs + 1] = v[1];
@@ -140,6 +96,14 @@ export function fillVec4(d: Float32Array, offs: number, v0: number, v1: number =
     d[offs + 1] = v1;
     d[offs + 2] = v2;
     d[offs + 3] = v3;
+    return 4;
+}
+
+export function fillVec4v(d: Float32Array, offs: number, v: vec4): number {
+    d[offs + 0] = v[0];
+    d[offs + 1] = v[1];
+    d[offs + 2] = v[2];
+    d[offs + 3] = v[3];
     return 4;
 }
 

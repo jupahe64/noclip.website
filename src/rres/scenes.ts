@@ -13,7 +13,7 @@ import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from './render';
 import { GXMaterialHacks } from '../gx/gx_material';
 import AnimationController from '../AnimationController';
 import { GfxDevice, GfxHostAccessPass } from '../gfx/platform/GfxPlatform';
-import { BasicGXRendererHelper } from '../gx/gx_render_2';
+import { BasicGXRendererHelper } from '../gx/gx_render';
 
 const materialHacks: GXMaterialHacks = {
     lightingFudge: (p) => `(0.5 * (${p.ambSource} + 0.2) * ${p.matSource})`,
@@ -27,9 +27,6 @@ export class BasicRRESRenderer extends BasicGXRendererHelper {
 
     private scn0Animators: BRRES.SCN0Animator[] = [];
     private lightSettings: BRRES.LightSetting[] = [];
-
-    protected nearClip = 10;
-    protected farClip = 50000;
 
     constructor(device: GfxDevice, public stageRRESes: BRRES.RRES[], public textureHolder = new RRESTextureHolder()) {
         super(device);
@@ -75,8 +72,6 @@ export class BasicRRESRenderer extends BasicGXRendererHelper {
     }
 
     protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
-        viewerInput.camera.setClipPlanes(this.nearClip, this.farClip);
-
         this.animationController.setTimeInMilliseconds(viewerInput.time);
 
         for (let i = 0; i < this.scn0Animators.length; i++)

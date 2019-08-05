@@ -238,8 +238,6 @@ function cmd_END_VTXS(ctx: ContextInternal) {
     for (let i = 0; i < newIndexBuffer.length; i++)
         ctx.indexes.push(newIndexBuffer[i]);
     const numIndices = newIndexBuffer.length;
-
-    ctx.drawCalls.push({ startIndex, numIndices });
 }
 
 function runCmd(ctx: ContextInternal, cmd: number) {
@@ -302,7 +300,7 @@ class ContextInternal {
     public s_vtx: Point;
     public s_nrm: Point;
     public s_polyType: PolyType;
-    public s_mtxId: number = -1;
+    public s_mtxId: number = 0;
     public s_startVertexIndex: number = 0;
 
     public vtxs: Vertex[] = [];
@@ -374,6 +372,7 @@ export function readCmds(buffer: ArrayBufferSlice, baseCtx: Context, posScale: n
 
     const packedVertexBuffer = ctx.makePackedVertexBuffer();
     const indexBuffer = new Uint16Array(ctx.indexes);
+    ctx.drawCalls.push({ startIndex: 0, numIndices: indexBuffer.length });
 
     return { packedVertexBuffer, indexBuffer, drawCalls: ctx.drawCalls };
 }

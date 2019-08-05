@@ -1,42 +1,70 @@
 
 import * as Viewer from '../viewer';
-import { GfxDevice, GfxHostAccessPass } from '../gfx/platform/GfxPlatform';
-import Progressable from '../Progressable';
-import { fetchData } from '../fetch';
+import { GfxDevice, GfxHostAccessPass, GfxRenderPassDescriptor, GfxRenderPass } from '../gfx/platform/GfxPlatform';
 import * as MapShape from './map_shape';
 import * as Tex from './tex';
-import { BasicRendererHelper } from '../oot3d/render';
 import { PaperMario64TextureHolder, PaperMario64ModelTreeRenderer, BackgroundBillboardRenderer } from './render';
 import ArrayBufferSlice from '../ArrayBufferSlice';
-import { makeClearRenderPassDescriptor } from '../gfx/helpers/RenderTargetHelpers';
+import { makeClearRenderPassDescriptor, BasicRenderTarget } from '../gfx/helpers/RenderTargetHelpers';
 import { OpaqueBlack, Color } from '../Color';
 import * as BYML from '../byml';
 import { ScriptExecutor } from './script';
+import { GfxRenderDynamicUniformBuffer } from '../gfx/render/GfxRenderDynamicUniformBuffer';
+import { GfxRenderInstManager } from '../gfx/render/GfxRenderer2';
+import { SceneContext } from '../SceneBase';
 
 const pathBase = `pm64`;
 
-class PaperMario64Renderer extends BasicRendererHelper {
+class PaperMario64Renderer implements Viewer.SceneGfx {
+    private clearRenderPassDescriptor: GfxRenderPassDescriptor;
+
     public textureHolder = new PaperMario64TextureHolder();
     public modelTreeRenderers: PaperMario64ModelTreeRenderer[] = [];
     public bgTextureRenderer: BackgroundBillboardRenderer | null = null;
     public scriptExecutor: ScriptExecutor | null = null;
 
-    constructor() {
-        super();
+    public renderTarget = new BasicRenderTarget();
+    public renderInstManager = new GfxRenderInstManager();
+    public uniformBuffer: GfxRenderDynamicUniformBuffer;
+
+    constructor(device: GfxDevice) {
+        this.uniformBuffer = new GfxRenderDynamicUniformBuffer(device);
         this.clearRenderPassDescriptor = makeClearRenderPassDescriptor(true, OpaqueBlack);
     }
 
-    public prepareToRender(hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    public prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+        const template = this.renderInstManager.pushTemplateRenderInst();
+        template.setUniformBuffer(this.uniformBuffer);
+
         if (this.scriptExecutor !== null)
             this.scriptExecutor.stepTime(viewerInput.time);
         if (this.bgTextureRenderer !== null)
-            this.bgTextureRenderer.prepareToRender(hostAccessPass, viewerInput);
+            this.bgTextureRenderer.prepareToRender(this.renderInstManager, viewerInput);
         for (let i = 0; i < this.modelTreeRenderers.length; i++)
-            this.modelTreeRenderers[i].prepareToRender(hostAccessPass, viewerInput);
+            this.modelTreeRenderers[i].prepareToRender(device, this.renderInstManager, viewerInput);
+
+        this.renderInstManager.popTemplateRenderInst();
+        this.uniformBuffer.prepareToRender(device, hostAccessPass);
+    }
+
+    public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): GfxRenderPass {
+        const hostAccessPass = device.createHostAccessPass();
+        this.prepareToRender(device, hostAccessPass, viewerInput);
+        device.submitPass(hostAccessPass);
+
+        const renderInstManager = this.renderInstManager;
+        this.renderTarget.setParameters(device, viewerInput.viewportWidth, viewerInput.viewportHeight);
+        const passRenderer = this.renderTarget.createRenderPass(device, this.clearRenderPassDescriptor);
+        passRenderer.setViewport(viewerInput.viewportWidth, viewerInput.viewportHeight);
+        renderInstManager.drawOnPassRenderer(device, passRenderer);
+        renderInstManager.resetRenderInsts();
+        return passRenderer;
     }
 
     public destroy(device: GfxDevice): void {
-        super.destroy(device);
+        this.renderInstManager.destroy(device);
+        this.renderTarget.destroy(device);
+        this.uniformBuffer.destroy(device);
         this.textureHolder.destroy(device);
         if (this.bgTextureRenderer !== null)
             this.bgTextureRenderer.destroy(device);
@@ -81,36 +109,32 @@ class PaperMario64SceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {
     }
 
-    public createScene(device: GfxDevice, abortSignal: AbortSignal): Progressable<Viewer.SceneGfx> {
-        const p: Progressable<ArrayBufferSlice>[] = [
-            fetchData(`${pathBase}/${this.id}_arc.crg1`, abortSignal),
-        ];
+    public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
+        const dataFetcher = context.dataFetcher;
+        const arcData = await dataFetcher.fetchData(`${pathBase}/${this.id}_arc.crg1`);
+        
+        const arc: Arc = BYML.parse(arcData, BYML.FileType.CRG1);
+        const renderer = new PaperMario64Renderer(device);
 
-        return Progressable.all(p).then(([arcData]) => {
-            const arc: Arc = BYML.parse(arcData, BYML.FileType.CRG1);
-            const renderer = new PaperMario64Renderer();
+        const tex = Tex.parseTextureArchive(arc.TexFile);
+        renderer.textureHolder.addTextureArchive(device, tex);
 
-            const tex = Tex.parseTextureArchive(arc.TexFile);
-            renderer.textureHolder.addTextureArchive(device, tex);
+        if (arc.BGTexFile !== null) {
+            const bgName = arc.BGTexName;
+            const bgTexture = Tex.parseBackground(arc.BGTexFile, bgName);
+            renderer.textureHolder.addTextures(device, [bgTexture]);
+            renderer.bgTextureRenderer = new BackgroundBillboardRenderer(device, renderer.textureHolder, bgName);
+        }
 
-            if (arc.BGTexFile !== null) {
-                const bgName = arc.BGTexName;
-                const bgTexture = Tex.parseBackground(arc.BGTexFile, bgName);
-                renderer.textureHolder.addTextures(device, [bgTexture]);
-                renderer.bgTextureRenderer = new BackgroundBillboardRenderer(device, renderer.viewRenderer, renderer.textureHolder, bgName);
-            }
+        const mapShape = MapShape.parse(arc.ShapeFile);
+        const modelTreeRenderer = new PaperMario64ModelTreeRenderer(device, tex, renderer.textureHolder, mapShape.rootNode);
+        renderer.modelTreeRenderers.push(modelTreeRenderer);
 
-            const mapShape = MapShape.parse(arc.ShapeFile);
-            const modelTreeRenderer = new PaperMario64ModelTreeRenderer(device, tex, renderer.textureHolder, mapShape.rootNode);
-            renderer.modelTreeRenderers.push(modelTreeRenderer);
-            modelTreeRenderer.addToViewRenderer(device, renderer.viewRenderer);
+        const scriptExecutor = new ScriptExecutor(renderer, arc.ROMOverlayData);
+        scriptExecutor.startFromHeader(arc.HeaderAddr);
+        renderer.scriptExecutor = scriptExecutor;
 
-            const scriptExecutor = new ScriptExecutor(renderer, arc.ROMOverlayData);
-            scriptExecutor.startFromHeader(arc.HeaderAddr);
-            renderer.scriptExecutor = scriptExecutor;
-
-            return renderer;
-        });
+        return renderer;
     }
 }
 

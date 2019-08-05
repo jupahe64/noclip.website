@@ -33,6 +33,7 @@ export class GfxRenderInst {
 
     // Pipeline building.
     private _renderPipelineDescriptor: GfxRenderPipelineDescriptor;
+    private _renderPipeline: GfxRenderPipeline | null = null;
 
     // Bindings building.
     private _uniformBuffer: GfxRenderDynamicUniformBuffer;
@@ -57,6 +58,7 @@ export class GfxRenderInst {
     public reset(): void {
         this.sortKey = 0;
         this.filterKey = 0;
+        this._renderPipeline = null;
     }
 
     public setFromTemplate(o: GfxRenderInst): void {
@@ -64,16 +66,22 @@ export class GfxRenderInst {
         this._renderPipelineDescriptor.program = o._renderPipelineDescriptor.program;
         this._renderPipelineDescriptor.inputLayout = o._renderPipelineDescriptor.inputLayout;
         this._renderPipelineDescriptor.topology = o._renderPipelineDescriptor.topology;
+        this._renderPipeline = o._renderPipeline;
         this._inputState = o._inputState;
         this._uniformBuffer = o._uniformBuffer;
         this.sortKey = o.sortKey;
         this.filterKey = o.filterKey;
-        this._setBindingLayout(o._bindingDescriptors[0].bindingLayout);
-        this.setSamplerBindingsFromTextureMappings(o._bindingDescriptors[0].samplerBindings);
-        for (let i = 0; i < o._bindingDescriptors[0].bindingLayout.numUniformBuffers; i++)
+        if (o._bindingDescriptors[0].bindingLayout !== null)
+            this._setBindingLayout(o._bindingDescriptors[0].bindingLayout);
+        for (let i = 0; i < o._bindingDescriptors[0].uniformBufferBindings.length; i++)
             this._bindingDescriptors[0].uniformBufferBindings[i].wordCount = o._bindingDescriptors[0].uniformBufferBindings[i].wordCount;
+        this.setSamplerBindingsFromTextureMappings(o._bindingDescriptors[0].samplerBindings);
         for (let i = 0; i < o._dynamicUniformBufferOffsets.length; i++)
             this._dynamicUniformBufferOffsets[i] = o._dynamicUniformBufferOffsets[i];
+    }
+
+    public setGfxRenderPipeline(pipeline: GfxRenderPipeline): void {
+        this._renderPipeline = pipeline;
     }
 
     public setGfxProgram(program: GfxProgram): void {
@@ -86,11 +94,6 @@ export class GfxRenderInst {
 
     public getMegaStateFlags(): GfxMegaStateDescriptor {
         return this._renderPipelineDescriptor.megaStateDescriptor;
-    }
-
-    public setInputState(device: GfxDevice, inputState: GfxInputState | null): void {
-        this._inputState = inputState;
-        this._renderPipelineDescriptor.inputLayout = inputState !== null ? device.queryInputState(inputState).inputLayout : null;
     }
 
     public setInputLayoutAndState(inputLayout: GfxInputLayout | null, inputState: GfxInputState | null): void {
@@ -176,17 +179,24 @@ export class GfxRenderInst {
     public drawOnPassWithState(device: GfxDevice, cache: GfxRenderCache, passRenderer: GfxRenderPass, state: GfxRendererTransientState): void {
         assert(!!(this._flags & GfxRenderInstFlags.DRAW_RENDER_INST));
 
-        if (state.currentRenderPipelineDescriptor === null || !gfxRenderPipelineDescriptorEquals(this._renderPipelineDescriptor, state.currentRenderPipelineDescriptor)) {
-            state.currentRenderPipelineDescriptor = this._renderPipelineDescriptor;
-            const gfxPipeline = cache.createRenderPipeline(device, state.currentRenderPipelineDescriptor);
-            state.currentRenderPipelineReady = device.queryPipelineReady(gfxPipeline);
-            if (!state.currentRenderPipelineReady)
-                return;
-
-            passRenderer.setPipeline(gfxPipeline);
+        if (this._renderPipeline !== null) {
+            state.currentRenderPipelineDescriptor = null;
+            const ready = device.queryPipelineReady(this._renderPipeline);
+            assert(ready);
+            passRenderer.setPipeline(this._renderPipeline);
         } else {
-            if (!state.currentRenderPipelineReady)
-                return;
+            if (state.currentRenderPipelineDescriptor === null || !gfxRenderPipelineDescriptorEquals(this._renderPipelineDescriptor, state.currentRenderPipelineDescriptor)) {
+                state.currentRenderPipelineDescriptor = this._renderPipelineDescriptor;
+                const gfxPipeline = cache.createRenderPipeline(device, state.currentRenderPipelineDescriptor);
+                state.currentRenderPipelineReady = device.queryPipelineReady(gfxPipeline);
+                if (!state.currentRenderPipelineReady)
+                    return;
+
+                passRenderer.setPipeline(gfxPipeline);
+            } else {
+                if (!state.currentRenderPipelineReady)
+                    return;
+            }
         }
 
         if (this._inputState !== state.currentInputState) {
@@ -213,8 +223,13 @@ export class GfxRenderInst {
     public drawOnPass(device: GfxDevice, cache: GfxRenderCache, passRenderer: GfxRenderPass): void {
         assert(!!(this._flags & GfxRenderInstFlags.DRAW_RENDER_INST));
 
-        const gfxPipeline = cache.createRenderPipeline(device, this._renderPipelineDescriptor);
-        passRenderer.setPipeline(gfxPipeline);
+        if (this._renderPipeline !== null) {
+            passRenderer.setPipeline(this._renderPipeline);
+        } else {
+            const gfxPipeline = cache.createRenderPipeline(device, this._renderPipelineDescriptor);
+            passRenderer.setPipeline(gfxPipeline);
+        }
+
         passRenderer.setInputState(this._inputState);
 
         for (let i = 0; i < this._bindingDescriptors[0].uniformBufferBindings.length; i++)

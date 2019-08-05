@@ -1,49 +1,20 @@
 
 import * as Viewer from "../viewer";
-import Progressable, { ProgressMeter } from "../Progressable";
 import { GfxDevice, GfxHostAccessPass } from "../gfx/platform/GfxPlatform";
-import { fetchData, NamedArrayBufferSlice } from "../fetch";
 import * as U8 from "./u8";
 import * as Yaz0 from "../compression/Yaz0";
 import * as BRRES from "./brres";
 import { assertExists, readString, assert } from "../util";
-import { BasicGXRendererHelper } from "../gx/gx_render_2";
+import { BasicGXRendererHelper } from "../gx/gx_render";
 import { MDL0ModelInstance, MDL0Model, RRESTextureHolder } from "./render";
 import AnimationController from "../AnimationController";
 import ArrayBufferSlice from "../ArrayBufferSlice";
-import { vec3, vec4, mat4 } from "gl-matrix";
-import { prepareFrameDebugOverlayCanvas2D, drawWorldSpacePoint } from "../DebugJunk";
-import { Magenta, Color, colorNewFromRGBA8, colorNew } from "../Color";
+import { mat4, vec3 } from "gl-matrix";
+import { drawWorldSpacePoint, getDebugOverlayCanvas2D } from "../DebugJunk";
+import { Magenta } from "../Color";
 import { GfxRenderCache } from "../gfx/render/GfxRenderCache";
-import { computeModelMatrixSRT } from "../MathHelpers";
-
-class DataFetcher {
-    private fileProgressables: Progressable<any>[] = [];
-
-    constructor(private abortSignal: AbortSignal, private progressMeter: ProgressMeter) {
-    }
-
-    private calcProgress(): number {
-        let n = 0;
-        for (let i = 0; i < this.fileProgressables.length; i++)
-            n += this.fileProgressables[i].progress;
-        return n / this.fileProgressables.length;
-    }
-
-    private setProgress(): void {
-        this.progressMeter.setProgress(this.calcProgress());
-    }
-
-    public fetchData(path: string): PromiseLike<NamedArrayBufferSlice> {
-        const p = fetchData(path, this.abortSignal);
-        this.fileProgressables.push(p);
-        p.onProgress = () => {
-            this.setProgress();
-        };
-        this.setProgress();
-        return p.promise;
-    }
-}
+import { SceneContext } from "../SceneBase";
+import { DataFetcher } from "../DataFetcher";
 
 class ResourceSystem {
     private mounts: U8.U8Archive[] = [];
@@ -122,21 +93,20 @@ function parsePMPF(buffer: ArrayBufferSlice): PMPEntry[] {
         const scaleY = view.getFloat32(tableIdx + 0x18);
         const scaleZ = view.getFloat32(tableIdx + 0x1C);
 
-        // TODO(jstpierre): Rotation matrix?
-        const r00 = view.getFloat32(tableIdx + 0x20);
-        const r01 = view.getFloat32(tableIdx + 0x24);
-        const r02 = view.getFloat32(tableIdx + 0x28);
+        const r20 = view.getFloat32(tableIdx + 0x20);
+        const r21 = view.getFloat32(tableIdx + 0x24);
+        const r22 = view.getFloat32(tableIdx + 0x28);
         const r10 = view.getFloat32(tableIdx + 0x2C);
         const r11 = view.getFloat32(tableIdx + 0x30);
         const r12 = view.getFloat32(tableIdx + 0x34);
-        const r20 = view.getFloat32(tableIdx + 0x38);
-        const r21 = view.getFloat32(tableIdx + 0x3C);
-        const r22 = view.getFloat32(tableIdx + 0x40);
+        const r00 = view.getFloat32(tableIdx + 0x38);
+        const r01 = view.getFloat32(tableIdx + 0x3C);
+        const r02 = view.getFloat32(tableIdx + 0x40);
 
         const modelMatrix = mat4.fromValues(
-            scaleX * r00, scaleX * r10, scaleX * r20, 0,
-            scaleY * r01, scaleY * r11, scaleY * r21, 0,
-            scaleZ * r02, scaleZ * r12, scaleZ * r22, 0,
+            scaleX * r00, scaleX * r01, scaleX * r02, 0,
+            scaleY * r10, scaleY * r11, scaleY * r12, 0,
+            scaleZ * r20, scaleZ * r21, scaleZ * r22, 0,
             translationX, translationY, translationZ, 1,
         );
 
@@ -147,7 +117,7 @@ function parsePMPF(buffer: ArrayBufferSlice): PMPEntry[] {
     return entries;
 }
 
-const scratchVec4 = vec4.create();
+const scratchVec3 = vec3.create();
 class WS2_Renderer extends BasicGXRendererHelper {
     public animationController = new AnimationController();
     public modelInstances: MDL0ModelInstance[] = [];
@@ -195,12 +165,12 @@ class WS2_Renderer extends BasicGXRendererHelper {
         this.renderHelper.prepareToRender(device, hostAccessPass);
 
         if (this.debugObjects) {
-            const ctx = prepareFrameDebugOverlayCanvas2D();
+            const ctx = getDebugOverlayCanvas2D();
             for (let i = 0; i < this.pmp.length; i++) {
                 const p = this.pmp[i];
-                const v = scratchVec4;
-                vec4.set(v, 0, 0, 0, 1);
-                vec4.transformMat4(v, v, p.modelMatrix);
+                const v = scratchVec3;
+                vec3.set(v, 0, 0, 0);
+                vec3.transformMat4(v, v, p.modelMatrix);
                 drawWorldSpacePoint(ctx, viewerInput.camera, v, Magenta, 10);
             }
         }
@@ -248,9 +218,9 @@ class IslandSceneDesc implements Viewer.SceneDesc {
         return true;
     }
 
-    public async createScene2(device: GfxDevice, abortSignal: AbortSignal, progressMeter: ProgressMeter): Promise<Viewer.SceneGfx> {
+    public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         // Fetch the SCN0.
-        const d = new DataFetcher(abortSignal, progressMeter);
+        const d = context.dataFetcher;
 
         const resourceSystem = new ResourceSystem();
         await fetchAndMount(resourceSystem, d, [

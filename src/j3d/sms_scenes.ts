@@ -5,21 +5,19 @@ import * as Yaz0 from '../compression/Yaz0';
 import * as RARC from './rarc';
 
 import ArrayBufferSlice from '../ArrayBufferSlice';
-import Progressable from '../Progressable';
 import { readString, assert, getTextDecoder } from '../util';
-import { fetchData } from '../fetch';
 
 import { BMDModelInstance, BMDModel } from './render';
 import { createModelInstance } from './scenes';
 import { EFB_WIDTH, EFB_HEIGHT } from '../gx/gx_material';
 import { mat4, quat } from 'gl-matrix';
 import { LoopMode, BMD, BMT, BCK, BTK, BRK } from './j3d';
-import { GXRenderHelperGfx } from '../gx/gx_render_2';
-import { GfxRenderInstViewRenderer } from '../gfx/render/GfxRenderer';
+import { GXRenderHelperGfx } from '../gx/gx_render';
 import { BasicRenderTarget, ColorTexture, makeClearRenderPassDescriptor, depthClearRenderPassDescriptor, noClearRenderPassDescriptor } from '../gfx/helpers/RenderTargetHelpers';
 import { GfxDevice, GfxHostAccessPass, GfxRenderPass } from '../gfx/platform/GfxPlatform';
 import { colorNew } from '../Color';
 import { GfxRenderCache } from '../gfx/render/GfxRenderCache';
+import { SceneContext } from '../SceneBase';
 
 const sjisDecoder = getTextDecoder('sjis');
 
@@ -304,7 +302,6 @@ export class SunshineRenderer implements Viewer.SceneGfx {
 
     protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
         const template = this.renderHelper.pushTemplateRenderInst();
-        viewerInput.camera.setClipPlanes(20, 500000);
         this.renderHelper.fillSceneParams(viewerInput, template);
         for (let i = 0; i < this.modelInstances.length; i++)
             this.modelInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
@@ -397,10 +394,11 @@ export class SunshineSceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {
     }
 
-    public createScene(device: GfxDevice, abortSignal: AbortSignal): Progressable<Viewer.SceneGfx> {
+    public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         const pathBase = `j3d/sms`;
         const path = `${pathBase}/${this.id}.szs`;
-        return fetchData(path, abortSignal).then((result: ArrayBufferSlice) => {
+        const dataFetcher = context.dataFetcher;
+        return dataFetcher.fetchData(path).then((result: ArrayBufferSlice) => {
             return Yaz0.decompress(result);
         }).then((buffer: ArrayBufferSlice) => {
             const rarc = RARC.parse(buffer);

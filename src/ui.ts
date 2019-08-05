@@ -37,7 +37,7 @@ export const TIME_OF_DAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox
 export const RENDER_HACKS_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 110 105" height="20" fill="white"><path d="M95,5v60H65c0-16.6-13.4-30-30-30V5H95z"/><path d="M65,65c0,16.6-13.4,30-30,30C18.4,95,5,81.6,5,65c0-16.6,13.4-30,30-30v30H65z"/></svg>`;
 export const SAND_CLOCK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" height="20" fill="white"><g><path d="M79.3,83.3h-6.2H24.9h-6.2c-1.7,0-3,1.3-3,3s1.3,3,3,3h60.6c1.7,0,3-1.3,3-3S81,83.3,79.3,83.3z"/><path d="M18.7,14.7h6.2h48.2h6.2c1.7,0,3-1.3,3-3s-1.3-3-3-3H18.7c-1.7,0-3,1.3-3,3S17,14.7,18.7,14.7z"/><path d="M73.1,66c0-0.9-0.4-1.8-1.1-2.4L52.8,48.5L72,33.4c0.7-0.6,1.1-1.4,1.1-2.4V20.7H24.9V31c0,0.9,0.4,1.8,1.1,2.4l19.1,15.1   L26,63.6c-0.7,0.6-1.1,1.4-1.1,2.4v11.3h48.2V66z"/></g></svg>';
 
-function setChildren(parent: Element, children: Element[]): void {
+export function setChildren(parent: Element, children: Element[]): void {
     // We want to swap children around without removing them, since removing them will cause
     // a relayout and possibly break scroll positions.
 
@@ -1063,7 +1063,7 @@ class SceneSelect extends Panel {
                 let visible = false;
                 let explicitlyInvisible = false;
 
-                explicitlyInvisible = item.sceneDescs.length <= 0;
+                explicitlyInvisible = item.sceneDescs.length <= 0 || item.hidden;
                 if (!explicitlyInvisible) {
                     // If header matches, then we are explicitly visible.
                     if (!visible == lastGroupHeaderVisible)
@@ -1123,7 +1123,7 @@ class SceneSelect extends Panel {
         this.syncSceneDescs();
     }
 
-    public setLoadProgress(pct: number) {
+    public setProgress(pct: number): void {
         this.loadProgress = pct;
         this.syncFlairs();
         this.syncHeaderStyle();
@@ -1449,6 +1449,10 @@ export class TextureViewer extends Panel {
         this.extraRack.appendChild(this.fullSurfaceView);
     }
 
+    public getViewerTextureList(): Viewer.Texture[] {
+        return this.textureList;
+    }
+
     private showInSurfaceView(surface: HTMLCanvasElement) {
         this.surfaceView.innerHTML = '';
         surface.style.width = '100%';
@@ -1498,7 +1502,9 @@ export class TextureViewer extends Panel {
             div.appendChild(valueSpan);
         });
 
+        if (texture.surfaces.length > 0)
         this.showInSurfaceView(texture.surfaces[0]);
+
         this.showInFullSurfaceView(texture.surfaces);
     }
 
@@ -1507,6 +1513,8 @@ export class TextureViewer extends Panel {
     }
 
     public setTextureList(textures: Viewer.Texture[]) {
+        textures = textures.filter((tex) => tex.surfaces.length > 0);
+
         this.setVisible(textures.length > 0);
         if (textures.length === 0)
             return;
@@ -1841,6 +1849,8 @@ class StatisticsPanel extends Panel {
 }
 
 class About extends Panel {
+    public onfaq: (() => void) | null = null;
+
     constructor() {
         super();
         this.setTitle(ABOUT_ICON, 'About');
@@ -1858,11 +1868,14 @@ class About extends Panel {
 #About li span {
     color: #aaa;
 }
-#About h2 {
+#About h1 {
     margin: 0px;
     font-size: 2em;
 }
-#About h2 span, #About h2 img {
+#About h2 {
+    font-size: 12.8pt;
+}
+#About h1 span, #About h1 img {
     vertical-align: middle;
     line-height: 64px;
 }
@@ -1872,7 +1885,10 @@ class About extends Panel {
 }
 </style>
 
-<h2> <img src="${logoURL}"> <span> noclip.website </span> </h2>
+<h1> <img src="${logoURL}"> <span> noclip.website </span> </h1>
+<h2> A digital museum of video game levels </h2>
+
+<a href="#" class="FAQLink"> What is this? / FAQ </a>
 
 <p> <strong>CLICK AND DRAG</strong> to look around and use <strong>WASD</strong> to move the camera </p>
 <p> Hold <strong>SHIFT</strong> to go faster, and use <strong>MOUSE WHEEL</strong> to fine tune the speed
@@ -1884,15 +1900,191 @@ class About extends Panel {
 
 <p><strong>OPEN SOURCE</strong> at <a href="${GITHUB_URL}">GitHub</a></p>
 
-<p>Feature requests and bugs welcome!</p>
+<p class="BuildVersion"><a href="${GITHUB_REVISION_URL}">build ${GIT_SHORT_REVISION}</a></p>
+</div>
+`;
+        const faqLink: HTMLAnchorElement = this.contents.querySelector('.FAQLink');
+        faqLink.onclick = () => {
+            if (this.onfaq !== null)
+                this.onfaq();
+        };
+    }
+}
 
-<p>
-<strong>BASED ON WORK</strong> by
+class FAQPanel implements Widget {
+    private toplevel: HTMLElement;
+    private panel: HTMLElement;
+
+    public elem: HTMLElement;
+
+    constructor() {
+        this.toplevel = document.createElement('div');
+        this.toplevel.classList.add('FAQPanel');
+        this.toplevel.style.position = 'absolute';
+        this.toplevel.style.left = '0';
+        this.toplevel.style.top = '0';
+        this.toplevel.style.right = '0';
+        this.toplevel.style.bottom = '0';
+        this.toplevel.style.background = 'rgba(0, 0, 0, 0.8)';
+        this.toplevel.onclick = () => {
+            this.elem.style.display = 'none';
+        };
+
+        const styleFrag = createDOMFromString(`
+<style>
+.FAQPanel a:link, .FAQPanel a:visited { color: #ddd; }
+.FAQPanel a:hover { color: #fff; }
+</style>
+`);
+        this.toplevel.appendChild(styleFrag);
+
+        this.panel = document.createElement('div');
+        this.panel.style.boxSizing = 'border-box';
+        this.panel.style.width = '50vw';
+        this.panel.style.margin = '5vh auto';
+        this.panel.style.height = '90vh';
+        this.panel.style.backgroundColor = 'black';
+        this.panel.style.padding = '2em';
+        this.panel.style.font = '11pt monospace';
+        this.panel.style.overflow = 'auto';
+        this.panel.style.color = '#ddd';
+        this.panel.style.textAlign = 'justify';
+        this.panel.onclick = (e) => {
+            e.stopPropagation();
+        };
+
+        const qa = document.createElement('div');
+        this.panel.appendChild(qa);
+
+        const faq = `
+## What is noclip.website?
+
+<p>noclip.website is a celebration of video game level design and art. It's a chance to
+explore and deepen your appreciation for some of your favorite games.</p>
+
+## Why did you make this?
+
+<p>I've always had an appreciation for the incredible worlds that game developers make.
+Sometimes staring closely at levels might help you understand the challenges the designers
+were facing, and what problems and techniques they used to solve them. You can learn a lot
+about a game by looking in the places they <em>don't</em> show in the game itself. It's
+also a ton of fun to test your memory, seeing if you can remember how a level is laid
+out, or where two rooms might connect to each other.</p>
+
+## It doesn't work!
+
+<p>Oops, sorry about that. Please let me know through either the <a href="https://discord.gg/bkJmKKv">official noclip.website Discord</a>
+or <a href="https://twitter.com/JasperRLZ/">Twitter</a>. Try to let me know what
+OS/browser/GPU you were using, and what game you tried to view, and I'll investigate.</p>
+
+## Can I request a game?
+
+<p>Maybe. Check around to see if anybody has looked at the game files before. If there's
+existing community documentation, that helps a lot. And if you're around to help answer
+questions or provide map names, I'm even more inclined.</p>
+
+<p>Even having documentation, games can take months of my time to add. So I have to be
+very careful with which games I choose to spend my time with.</p>
+
+<p>If you have some programming skills and want to try to add a game yourself, I fully
+welcome that. Join the Discord and I will be happy to help you get set up with a
+development environment and walk you through the code.</p>
+
+## Why do some levels look broken?
+
+<p>In order to put a game on the website, I first need to take apart the game, extract
+the data, and then figure out how to put it back together. Some of these games, especially
+the newer ones, are really complex with their levels and their models, and that often means
+it takes more work to make it look correct. The line between "game engine" and "game data"
+is only getting blurrier and blurrier.</p>
+
+<p>My dream is that the site contains fully accurate versions of each game, and I try
+to get closer to that goal when I can, but the effort and time involved to make an accurate
+recreation can sometimes be far too much, or would push me more into recreating large
+parts of the original game's engine, which I'm less interested in doing myself.</p>
+
+## How do I export models from the site?
+
+<p>You can't. From the technical side, there is no one consistent file format that has
+all of the features that an accurate model would require. From a personal perspective,
+I'm not ready to take on the support burden of writing an export tool.</p>
+
+<p>That said, if you would like to use my work as a base to build your own tools, the website
+is open-source and source code can be found at <a href="https://github.com/magcius/noclip.website">GitHub</a>.</p>
+
+<p>If you are looking for art for your own projects, there are some fantastic artists
+out there in the community that are always looking for work. Hire them instead of
+using art assets from other games.</p>
+
+## This is cool! Any way I can help you out!
+
+<p>Absolutely. Join <a href="https://discord.gg/bkJmKKv">the official Discord</a> and ask around if you would like to help out.
+The easiest things to help out with are providing savestates and naming maps, and can
+be done even if you do not know how to code. There's also some work that would be
+appreciated to help me improve accuracy, like running games in certain modes to help
+me compare the two.</p>
+
+<p>If you have a more tech-y background, there's always coding work to be done. All
+the source code to the site is available at <a href="https://github.com/magcius/noclip.website">GitHub</a>,
+whether you want to browse around, use it for your own purposes, or help contribute.</p>
+
+## Why does Skyward Sword have a level called Despacito? Is that its official name?
+
+<p>Nah. The internal names of a lot of the Zelda games is often just a letter-number code,
+something like 'F203_05'. Most of the maps have no real in-game name as far as I can
+tell, so I often spend a lot of time hunting down longplays on YouTube or playing the
+game myself to try and come up with a name for it. I had done this for most of
+Skyward Sword, but got a bit stumped on some of the maps, and put "Despacito" as an
+inside joke.</p>
+
+<p>If you come up with a better name for these maps, feel free to tell me, either on
+the <a href="https://discord.gg/bkJmKKv">official noclip.website Discord</a> or through
+<a href="https://twitter.com/JasperRLZ/">Twitter</a>.</p>
+
+## Are you afraid of being taken down?
+
+<p>Less than you might think. Companies take down fan projects when they're competing
+with their in-house projects. I don't see noclip.website as competing with any game
+out there &mdash; it's more of a museum, not a game. The worlds on display are incredible
+and I hope they encourage you to go out and buy a copy of the game itself.</p>
+
+<p>That said, I have enormous respect for the developers and dev teams and if I received
+a take-down request, I would honor it. It is their work on display, after all.</p>
+
+<p>Developers are only able to make these fantastic worlds if we collectively support
+them. noclip would not exist without their hard work and dedication. To ensure that they
+remain healthy, please try to buy games instead of pirating them. I also put in extra effort
+to ensure that all assets available on this site cannot be used to pirate the game itself.</p>
+
+## Do you accept donations?
+
+<p>No. Use the money to buy some games instead.</p>
+
+## Any affiliation to noclip, the documentary people?
+
+<p>I chatted with them once, but the name is a coincidence. The name comes from an old Quake
+command that would let you fly through the levels here, just like in the game.</p>
+
+## Have you seen the YouTube show Boundary Break?
+
+<p>Of course! I love that show. I'm ecstatic to see that exploring video game levels from
+different angles has captured the imaginations of such a wide audience. And I hope that this
+site encourages that same curiosity that's visible all throughout Boundary Break, trekking
+through these levels on your own adventures!</p>
+
+## Who made this site?
+
+<p>In my opinion? The artists and game developers. They made everything you actually see here
+on display.</p>
+
+<p>But in terms of, you know, developing the site itself, that would be me, <a href="https://twitter.com/JasperRLZ/">Jasper</a>,
+but I could not have done it alone. I've been assisted by so many others throughout:
 <a href="https://twitter.com/beholdnec">N.E.C.</a>,
 <a href="https://twitter.com/JuPaHe64">JuPaHe64</a>,
 <a href="https://twitter.com/Jawchewa">Jawchewa</a>,
 <a href="https://twitter.com/Starschulz">Starschulz</a>,
 <a href="https://twitter.com/kittensandals">SpaceCats</a>,
+<a href="https://twitter.com/pupperuki">Aruki</a>,
 <a href="https://twitter.com/TanukiMatthew">TanukiMatthew</a>,
 <a href="https://twitter.com/QuadeZaban">Quade Zaban</a>,
 <a href="https://twitter.com/Murugalstudio">Murugo</a>,
@@ -1905,13 +2097,10 @@ class About extends Panel {
 <a href="https://github.com/vlad001">vlad001</a>,
 <a href="https://twitter.com/Jewelots_">Jewel</a>,
 <a href="https://twitter.com/instant_grat">Instant Grat</a>,
-<a href="https://twitter.com/pupperuki">Aruki</a>
-</p>
+along with countless others from the modding communities, game reverse
+engineering and research communities, and emulation communities.</p>
 
-<p><strong>MODELS</strong> © Nintendo, SEGA, Retro Studios, FROM Software,
-Konami, Neversoft, Double Fine Productions, HAL Laboratories</p>
-
-<p><strong>ICONS</strong> from <a href="https://thenounproject.com/">The Noun Project</a>,
+<p>All icons you see are from <a href="https://thenounproject.com/">The Noun Project</a>,
 used under Creative Commons CC-BY:</p>
 <ul>
 <li> Truncated Pyramid <span>by</span> Bohdan Burmich
@@ -1926,10 +2115,39 @@ used under Creative Commons CC-BY:</p>
 <li> Save <span>by</span> Prime Icons
 <li> Overlap <span>by</span> Zach Bogart
 </ul>
-
-<p class="BuildVersion"><a href="${GITHUB_REVISION_URL}">build ${GIT_SHORT_REVISION}</a></p>
-</div>
 `;
+
+        const qas = faq.split('##').slice(1).map((qa) => {
+            const firstNewline = qa.indexOf('\n');
+            const question = qa.slice(0, firstNewline).trim();
+            const answer = qa.slice(firstNewline).trim();
+
+            return { question, answer };
+        });
+
+        for (let i = 0; i < qas.length; i++) {
+            const block = document.createElement('div');
+
+            const title = qas[i].question;
+
+            const q = document.createElement('p');
+            q.style.color = '#ccc';
+            q.style.fontWeight = 'bold';
+            q.style.marginTop = '0';
+            q.style.fontSize = '12pt';
+            q.textContent = title;
+            block.appendChild(q);
+            const a = document.createElement('p');
+            a.style.marginBottom = '1.6em';
+            a.innerHTML = qas[i].answer;
+            block.appendChild(a);
+
+            qa.appendChild(block);
+        }
+
+        this.toplevel.appendChild(this.panel);
+
+        this.elem = this.toplevel;
     }
 }
 
@@ -2183,6 +2401,14 @@ export class UI {
     public elem: HTMLElement;
 
     private toplevel: HTMLElement;
+
+    public dragHighlight: HTMLElement;
+    public sceneUIContainer: HTMLElement;
+
+    private floatingPanelContainer: HTMLElement;
+    private floatingPanels: FloatingPanel[] = [];
+
+    private panelToplevel: HTMLElement;
     private panelContainer: HTMLElement;
 
     public sceneSelect: SceneSelect;
@@ -2193,30 +2419,54 @@ export class UI {
     public timePanel: TimePanel;
     public panels: Panel[];
     private about: About;
+    private faqPanel: FAQPanel;
 
     constructor(public viewer: Viewer.Viewer) {
         this.toplevel = document.createElement('div');
-        this.toplevel.style.position = 'absolute';
-        this.toplevel.style.left = '0';
-        this.toplevel.style.top = '0';
-        this.toplevel.style.bottom = '0';
-        this.toplevel.style.padding = '2em';
-        this.toplevel.style.transition = '.2s background-color';
-        this.toplevel.onmouseover = () => {
-            this.toplevel.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
-            this.toplevel.style.overflow = 'auto';
+
+        this.sceneUIContainer = document.createElement('div');
+        this.sceneUIContainer.style.pointerEvents = 'none';
+        this.toplevel.appendChild(this.sceneUIContainer);
+
+        this.panelToplevel = document.createElement('div');
+        this.panelToplevel.style.position = 'absolute';
+        this.panelToplevel.style.left = '0';
+        this.panelToplevel.style.top = '0';
+        this.panelToplevel.style.bottom = '0';
+        this.panelToplevel.style.padding = '2em';
+        this.panelToplevel.style.transition = '.2s background-color';
+        this.panelToplevel.onmouseover = () => {
+            this.panelToplevel.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
+            this.panelToplevel.style.overflow = 'auto';
             this.setPanelsAutoClosed(false);
         };
-        this.toplevel.onmouseout = () => {
-            this.toplevel.style.backgroundColor = 'rgba(0, 0, 0, 0)';
-            this.toplevel.style.overflow = 'hidden';
+        this.panelToplevel.onmouseout = () => {
+            this.panelToplevel.style.backgroundColor = 'rgba(0, 0, 0, 0)';
+            this.panelToplevel.style.overflow = 'hidden';
         };
 
         this.panelContainer = document.createElement('div');
         this.panelContainer.style.display = 'grid';
         this.panelContainer.style.gridTemplateColumns = '1fr';
         this.panelContainer.style.gridGap = '20px';
-        this.toplevel.appendChild(this.panelContainer);
+        this.panelToplevel.appendChild(this.panelContainer);
+
+        this.toplevel.appendChild(this.panelToplevel);
+
+        this.dragHighlight = document.createElement('div');
+        this.toplevel.appendChild(this.dragHighlight);
+        this.dragHighlight.style.position = 'absolute';
+        this.dragHighlight.style.left = '0';
+        this.dragHighlight.style.right = '0';
+        this.dragHighlight.style.top = '0';
+        this.dragHighlight.style.bottom = '0';
+        this.dragHighlight.style.backgroundColor = 'rgba(255, 255, 255, 0.5)';
+        this.dragHighlight.style.boxShadow = '0 0 40px 5px white inset';
+        this.dragHighlight.style.display = 'none';
+        this.dragHighlight.style.pointerEvents = 'none';
+
+        this.floatingPanelContainer = document.createElement('div');
+        this.toplevel.appendChild(this.floatingPanelContainer);
 
         this.sceneSelect = new SceneSelect(viewer);
         this.saveStatesPanel = new SaveStatesPanel(viewer.inputManager);
@@ -2226,9 +2476,21 @@ export class UI {
         this.timePanel = new TimePanel();
         this.about = new About();
 
-        this.setScene(null);
+        this.about.onfaq = () => {
+            this._onFAQ();
+        };
+
+        this.faqPanel = new FAQPanel();
+        this.faqPanel.elem.style.display = 'none';
+        this.toplevel.appendChild(this.faqPanel.elem);
+
+        this.setScenePanels(null);
 
         this.elem = this.toplevel;
+    }
+
+    private _onFAQ(): void {
+        this.faqPanel.elem.style.display = 'block';
     }
 
     public sceneChanged() {
@@ -2250,15 +2512,18 @@ export class UI {
         setChildren(this.panelContainer, panels.map((panel) => panel.elem));
     }
 
-    public setScene(scene: Viewer.SceneGfx | null): void {
-        if (scene !== null) {
-            let panels: Panel[] = [];
-            if (scene.createPanels !== undefined)
-                panels = scene.createPanels();
-            this.setPanels([this.sceneSelect, ...panels, this.textureViewer, this.timePanel, this.saveStatesPanel, this.viewerSettings, this.statisticsPanel, this.about]);
-        } else {
+    public destroyScene(): void {
+        setChildren(this.sceneUIContainer, []);
+
+        for (let i = 0; i < this.floatingPanels.length; i++)
+            this.floatingPanels[i].destroy();
+    }
+
+    public setScenePanels(scenePanels: Panel[] | null): void {
+        if (scenePanels !== null)
+            this.setPanels([this.sceneSelect, ...scenePanels, this.textureViewer, this.timePanel, this.saveStatesPanel, this.viewerSettings, this.statisticsPanel, this.about]);
+        else
             this.setPanels([this.sceneSelect, this.about]);
-        }
     }
 
     public setPanelsAutoClosed(v: boolean): void {
@@ -2277,5 +2542,72 @@ export class UI {
         this.elem.style.pointerEvents = isDragging ? 'none' : '';
         if (isDragging && this.shouldPanelsAutoClose())
             this.setPanelsAutoClosed(true);
+    }
+
+    public makeFloatingPanel(title: string = 'Floating Panel', icon: string = RENDER_HACKS_ICON): FloatingPanel {
+        const panel = new FloatingPanel();
+        panel.setWidth(600);
+        panel.setTitle(icon, title);
+        this.floatingPanelContainer.appendChild(panel.elem);
+        this.floatingPanels.push(panel);
+        return panel;
+    }
+
+    private debugFloater: FloatingPanel | null = null;
+    private getDebugFloater(): FloatingPanel {
+        if (this.debugFloater === null)
+            this.debugFloater = this.makeFloatingPanel('Debug');
+        return this.debugFloater;
+    }
+
+    public bindSlider(obj: { [k: string]: number }, paramName: string, min = 0, max = 1, labelName: string = paramName, panel: FloatingPanel): void {
+        let value = obj[paramName];
+        assert(typeof value === "number");
+
+        const slider = new Slider();
+        slider.onvalue = (newValue: number) => {
+            obj[paramName] = newValue;
+            window.debugObj = obj;
+            update();
+        };
+        update();
+
+        function update() {
+            value = obj[paramName];
+            slider.setLabel(`${labelName} = ${value.toFixed(2)}`);
+            min = Math.min(value, min);
+            max = Math.max(value, max);
+            slider.setRange(min, max);
+            slider.setValue(value);
+        }
+
+        setInterval(() => {
+            if (obj[paramName] !== value)
+                update();
+        }, 100);
+
+        panel.contents.appendChild(slider.elem);
+    }
+
+    private bindSlidersRecurse(obj: { [k: string]: any }, parentName: string, panel: FloatingPanel): void {
+        for (const keyName in obj) {
+            const v = obj[keyName];
+            if (typeof v === "number")
+                this.bindSlider(obj, keyName, 0, 1, `${parentName}.${keyName}`, panel);
+            if (v instanceof Float32Array)
+                this.bindSlidersRecurse(v, `${parentName}.${keyName}`, panel);
+        }
+    }
+
+    public bindSliders(obj: { [k: string]: any }, panel: FloatingPanel | null = null): void {
+        if (panel === null)
+            panel = this.getDebugFloater();
+
+        while (panel.contents.firstChild)
+            panel.contents.removeChild(panel.contents.firstChild);
+
+        this.bindSlidersRecurse(obj, '', panel);
+
+        window.debugObj = obj;
     }
 }

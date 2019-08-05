@@ -1,40 +1,38 @@
 
 import { mat4, vec3 } from 'gl-matrix';
 
-import ArrayBufferSlice from '../ArrayBufferSlice';
-import Progressable from '../Progressable';
-import { readString, assertExists, hexzero, leftPad, assert } from '../util';
-import { fetchData } from '../fetch';
+import ArrayBufferSlice from '../../ArrayBufferSlice';
+import { readString, assertExists, hexzero, leftPad, assert } from '../../util';
+import { DataFetcher } from '../../DataFetcher';
 
-import * as Viewer from '../viewer';
-import * as BYML from '../byml';
-import * as Yaz0 from '../compression/Yaz0';
-import * as UI from '../ui';
+import * as Viewer from '../../viewer';
+import * as BYML from '../../byml';
+import * as RARC from '../rarc';
+import * as Yaz0 from '../../compression/Yaz0';
+import * as UI from '../../ui';
 
-import * as GX_Material from '../gx/gx_material';
+import * as GX_Material from '../../gx/gx_material';
 
-import { BMD, BTK, BRK, BCK, BTI, LoopMode, BMT } from './j3d';
-import * as RARC from './rarc';
-import { BMDModelInstance, BMDModel, BTIData } from './render';
-import { Camera, computeViewMatrix } from '../Camera';
-import { DeviceProgram } from '../Program';
-import { colorToCSS, Color } from '../Color';
-import { ColorKind } from '../gx/gx_render';
-import { GXRenderHelperGfx } from '../gx/gx_render_2';
-import { GfxDevice, GfxRenderPass, GfxHostAccessPass, GfxBufferUsage, GfxFormat, GfxVertexAttributeFrequency, GfxInputLayout, GfxInputState, GfxBuffer, GfxProgram, GfxBindingLayoutDescriptor, GfxCompareMode, GfxBufferFrequencyHint, GfxVertexAttributeDescriptor } from '../gfx/platform/GfxPlatform';
-import { GfxRendererLayer } from '../gfx/render/GfxRenderer';
-import { GfxRenderInst, GfxRenderInstManager } from '../gfx/render/GfxRenderer2';
-import { BasicRenderTarget, standardFullClearRenderPassDescriptor, depthClearRenderPassDescriptor } from '../gfx/helpers/RenderTargetHelpers';
-import { makeStaticDataBuffer } from '../gfx/helpers/BufferHelpers';
-import { GfxRenderBuffer } from '../gfx/render/GfxRenderBuffer';
-import { BufferFillerHelper, fillMatrix4x4, fillMatrix4x3, fillColor } from '../gfx/helpers/UniformBufferHelpers';
-import { makeTriangleIndexBuffer, GfxTopology } from '../gfx/helpers/TopologyHelpers';
-import AnimationController from '../AnimationController';
-import { prepareFrameDebugOverlayCanvas2D } from '../DebugJunk';
-
-import * as DZB from './zww_dzb';
-import { ObjectRenderer, BMDObjectRenderer, SymbolMap, WhiteFlowerData, FlowerObjectRenderer, PinkFlowerData, BessouFlowerData, FlowerData } from './zww_actors';
-import { GfxRenderCache } from '../gfx/render/GfxRenderCache';
+import * as DZB from './DZB';
+import * as JPA from '../JPA';
+import { BMD, BTK, BRK, BCK, BTI, LoopMode, BMT } from '../j3d';
+import { BMDModelInstance, BMDModel, BTIData } from '../render';
+import { Camera, computeViewMatrix } from '../../Camera';
+import { DeviceProgram } from '../../Program';
+import { colorToCSS, Color } from '../../Color';
+import { ColorKind } from '../../gx/gx_render';
+import { GXRenderHelperGfx } from '../../gx/gx_render';
+import { GfxDevice, GfxRenderPass, GfxHostAccessPass, GfxBufferUsage, GfxFormat, GfxVertexAttributeFrequency, GfxInputLayout, GfxInputState, GfxBuffer, GfxProgram, GfxBindingLayoutDescriptor, GfxCompareMode, GfxBufferFrequencyHint, GfxVertexAttributeDescriptor } from '../../gfx/platform/GfxPlatform';
+import { GfxRendererLayer } from '../../gfx/render/GfxRenderer';
+import { GfxRenderInstManager } from '../../gfx/render/GfxRenderer2';
+import { BasicRenderTarget, standardFullClearRenderPassDescriptor, depthClearRenderPassDescriptor } from '../../gfx/helpers/RenderTargetHelpers';
+import { makeStaticDataBuffer } from '../../gfx/helpers/BufferHelpers';
+import { fillMatrix4x4, fillMatrix4x3, fillColor } from '../../gfx/helpers/UniformBufferHelpers';
+import { makeTriangleIndexBuffer, GfxTopology } from '../../gfx/helpers/TopologyHelpers';
+import AnimationController from '../../AnimationController';
+import { GfxRenderCache } from '../../gfx/render/GfxRenderCache';
+import { ObjectRenderer, BMDObjectRenderer, SymbolMap, WhiteFlowerData, FlowerObjectRenderer, PinkFlowerData, BessouFlowerData, FlowerData } from './Actors';
+import { SceneContext } from '../../SceneBase';
 
 class ZWWExtraTextures {
     constructor(public ZAtoon: BTIData, public ZBtoonEX: BTIData) {
@@ -95,7 +93,7 @@ function parseDZSHeaders(buffer: ArrayBufferSlice): Map<string, DZSChunkHeader> 
     return chunkHeaders;
 }
 
-function getColorsFromDZS(buffer: ArrayBufferSlice, roomIdx: number, timeOfDay: number): Colors | undefined {
+export function getColorsFromDZS(buffer: ArrayBufferSlice, roomIdx: number, timeOfDay: number): Colors | undefined {
     const view = buffer.createDataView();
     const chunkHeaders = parseDZSHeaders(buffer);
 
@@ -454,6 +452,71 @@ class SeaPlane {
     }
 }
 
+class SimpleEffectSystem {
+    private emitterManager: JPA.JPAEmitterManager;
+    private drawInfo = new JPA.JPADrawInfo();
+    private jpacData: JPA.JPACData;
+    private resourceDatas = new Map<number, JPA.JPAResourceData>();
+
+    constructor(device: GfxDevice, private jpac: JPA.JPAC) {
+        this.emitterManager = new JPA.JPAEmitterManager(device, 6000, 300);
+        this.jpacData = new JPA.JPACData(this.jpac);
+    }
+
+    private getResourceData(device: GfxDevice, userIndex: number): JPA.JPAResourceData | null {
+        if (!this.resourceDatas.has(userIndex)) {
+            const resData = new JPA.JPAResourceData(device, this.jpacData, this.jpac.effects.find((resource) => resource.resourceId === userIndex));
+            this.resourceDatas.set(userIndex, resData);
+        }
+
+        return this.resourceDatas.get(userIndex);
+    }
+
+    public setDrawInfo(posCamMtx: mat4, prjMtx: mat4, texPrjMtx: mat4 | null): void {
+        this.drawInfo.posCamMtx = posCamMtx;
+        this.drawInfo.prjMtx = prjMtx;
+        this.drawInfo.texPrjMtx = texPrjMtx;
+    }
+
+    public calc(viewerInput: Viewer.ViewerRenderInput): void {
+        const inc = viewerInput.deltaTime * 30/1000;
+        this.emitterManager.calc(inc);
+    }
+
+    public draw(device: GfxDevice, renderHelper: GXRenderHelperGfx, drawGroupId: number = 0): void {
+        this.emitterManager.draw(device, renderHelper, this.drawInfo, drawGroupId);
+    }
+
+    public createEmitter(device: GfxDevice, resourceId: number = 0x14) {
+        const emitter = this.emitterManager.createEmitter(this.getResourceData(device, resourceId));
+        if (emitter !== null) {
+            emitter.globalTranslation[0] = -275;
+            emitter.globalTranslation[1] = 150;
+            emitter.globalTranslation[2] = 2130;
+        }
+
+        const orig = vec3.clone(emitter.globalTranslation);
+        let t = 0;
+        function move() {
+            t += 0.1;
+            emitter.globalTranslation[0] = orig[0] + Math.sin(t) * 50;
+            emitter.globalTranslation[1] = orig[1] + Math.sin(t * 0.777) * 50;
+            emitter.globalTranslation[2] = orig[2] + Math.cos(t) * 50;
+            requestAnimationFrame(move);
+        }
+        requestAnimationFrame(move);
+
+        return emitter;
+    }
+
+    public destroy(device: GfxDevice): void {
+        this.jpacData.destroy(device);
+        for (const [, resourceData] of this.resourceDatas.entries())
+            resourceData.destroy(device);
+        this.emitterManager.destroy(device);
+    }
+}
+
 const enum WindWakerPass {
     MAIN = 0x01,
     SKYBOX = 0x02,
@@ -468,7 +531,9 @@ export class WindWakerRenderer implements Viewer.SceneGfx {
     private vr_uso_umi: BMDModelInstance;
     private vr_kasumi_mae: BMDModelInstance;
     private vr_back_cloud: BMDModelInstance;
+
     public roomRenderers: WindWakerRoomRenderer[] = [];
+    public effectSystem: SimpleEffectSystem | null = null;
 
     private currentTimeOfDay: number;
     private timeOfDaySelector: UI.SingleSelect;
@@ -586,11 +651,6 @@ export class WindWakerRenderer implements Viewer.SceneGfx {
     }
 
     private prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
-        if (this.isFullSea)
-            viewerInput.camera.setClipPlanes(20, 5000000);
-        else
-            viewerInput.camera.setClipPlanes(20, 5000000);
-
         const template = this.renderHelper.pushTemplateRenderInst();
 
         this.renderHelper.fillSceneParams(viewerInput, template);
@@ -606,13 +666,21 @@ export class WindWakerRenderer implements Viewer.SceneGfx {
             this.vr_back_cloud.prepareToRender(device, this.renderHelper, viewerInput);
         for (let i = 0; i < this.roomRenderers.length; i++)
             this.roomRenderers[i].prepareToRender(device, this.renderHelper, viewerInput);
+
+        if (this.effectSystem !== null) {
+            const template = this.renderHelper.renderInstManager.pushTemplateRenderInst();
+            template.filterKey = WindWakerPass.MAIN;
+            this.effectSystem.calc(viewerInput);
+            this.effectSystem.setDrawInfo(viewerInput.camera.viewMatrix, viewerInput.camera.projectionMatrix, null);
+            this.effectSystem.draw(device, this.renderHelper);
+            this.renderHelper.renderInstManager.popTemplateRenderInst();
+        }
+
         this.renderHelper.renderInstManager.popTemplateRenderInst();
         this.renderHelper.prepareToRender(device, hostAccessPass);
     }
 
     public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): GfxRenderPass {
-        prepareFrameDebugOverlayCanvas2D();
-
         const renderInstManager = this.renderHelper.renderInstManager;
 
         const hostAccessPass = device.createHostAccessPass();
@@ -666,6 +734,8 @@ export class WindWakerRenderer implements Viewer.SceneGfx {
             this.seaPlane.destroy(device);
         for (let i = 0; i < this.roomRenderers.length; i++)
             this.roomRenderers[i].destroy(device);
+        if (this.effectSystem !== null)
+            this.effectSystem.destroy(device);
         this.modelCache.destroy(device);
     }
 }
@@ -675,32 +745,35 @@ interface Destroyable {
 }
 
 class ModelCache {
-    private fileProgressableCache = new Map<string, Progressable<ArrayBufferSlice>>();
+    private filePromiseCache = new Map<string, Promise<ArrayBufferSlice>>();
     private fileDataCache = new Map<string, ArrayBufferSlice>();
-    private archiveProgressableCache = new Map<string, Progressable<RARC.RARC>>();
+    private archivePromiseCache = new Map<string, Promise<RARC.RARC>>();
     private archiveCache = new Map<string, RARC.RARC>();
     private modelCache = new Map<string, BMDModel>();
     public extraCache = new Map<string, Destroyable>();
     public extraModels: BMDModel[] = [];
 
-    public waitForLoad(): Progressable<any> {
-        const v: Progressable<any>[] = [... this.fileProgressableCache.values(), ... this.archiveProgressableCache.values()];
-        return Progressable.all(v);
+    constructor(private dataFetcher: DataFetcher) {
     }
 
-    private fetchFile(path: string, abortSignal: AbortSignal): Progressable<ArrayBufferSlice> {
-        assert(!this.fileProgressableCache.has(path));
-        const p = fetchData(path, abortSignal);
-        this.fileProgressableCache.set(path, p);
+    public waitForLoad(): Promise<any> {
+        const v: Promise<any>[] = [... this.filePromiseCache.values(), ... this.archivePromiseCache.values()];
+        return Promise.all(v);
+    }
+
+    private fetchFile(path: string): Promise<ArrayBufferSlice> {
+        assert(!this.filePromiseCache.has(path));
+        const p = this.dataFetcher.fetchData(path);
+        this.filePromiseCache.set(path, p);
         return p;
     }
 
-    public fetchFileData(path: string, abortSignal: AbortSignal): Progressable<ArrayBufferSlice> {
-        const p = this.fileProgressableCache.get(path);
+    public fetchFileData(path: string): Promise<ArrayBufferSlice> {
+        const p = this.filePromiseCache.get(path);
         if (p !== undefined) {
             return p.then(() => this.getFileData(path));
         } else {
-            return this.fetchFile(path, abortSignal).then((data) => {
+            return this.fetchFile(path).then((data) => {
                 this.fileDataCache.set(path, data);
                 return data;
             });
@@ -715,10 +788,10 @@ class ModelCache {
         return assertExists(this.archiveCache.get(archivePath));
     }
 
-    public fetchArchive(archivePath: string, abortSignal: AbortSignal): Progressable<RARC.RARC> {
-        let p = this.archiveProgressableCache.get(archivePath);
+    public fetchArchive(archivePath: string): Promise<RARC.RARC> {
+        let p = this.archivePromiseCache.get(archivePath);
         if (p === undefined) {
-            p = this.fetchFile(archivePath, abortSignal).then((data) => {
+            p = this.fetchFile(archivePath).then((data) => {
                 if (readString(data, 0, 0x04) === 'Yaz0')
                     return Yaz0.decompress(data);
                 else
@@ -728,7 +801,7 @@ class ModelCache {
                 this.archiveCache.set(archivePath, arc);
                 return arc;
             });
-            this.archiveProgressableCache.set(archivePath, p);
+            this.archivePromiseCache.set(archivePath, p);
         }
 
         return p;
@@ -774,16 +847,17 @@ class SceneDesc {
             this.id = `Room${rooms[0]}.arc`;
     }
 
-    public createScene(device: GfxDevice, abortSignal: AbortSignal): Progressable<Viewer.SceneGfx> {
-        const modelCache = new ModelCache();
+    public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
+        const modelCache = new ModelCache(context.dataFetcher);
+
+        modelCache.fetchArchive(`${pathBase}/Object/System.arc`);
+        modelCache.fetchArchive(`${pathBase}/Stage/${this.stageDir}/Stage.arc`);
+        modelCache.fetchFileData(`${pathBase}/Particle/common.jpc`);
 
         // XXX(jstpierre): This is really terrible code.
-        modelCache.fetchArchive(`${pathBase}/Object/System.arc`, abortSignal);
-        modelCache.fetchArchive(`${pathBase}/Stage/${this.stageDir}/Stage.arc`, abortSignal);
-
         for (let i = 0; i < this.rooms.length; i++) {
             const roomIdx = Math.abs(this.rooms[i]);
-            modelCache.fetchArchive(`${pathBase}/Stage/${this.stageDir}/Room${roomIdx}.arc`, abortSignal);
+            modelCache.fetchArchive(`${pathBase}/Stage/${this.stageDir}/Room${roomIdx}.arc`);
         }
 
         return modelCache.waitForLoad().then(() => {
@@ -828,7 +902,13 @@ class SceneDesc {
 
                 // Now spawn any objects that might show up in it.
                 const dzr = roomRarc.findFileData('dzr/room.dzr')!;
-                this.spawnObjectsFromDZR(device, abortSignal, renderer, roomRenderer, dzr, modelMatrix);
+                this.spawnObjectsFromDZR(device, renderer, roomRenderer, dzr, modelMatrix);
+            }
+
+            const particleCommon = modelCache.getFileData(`${pathBase}/Particle/common.jpc`);
+            if (particleCommon !== null && particleCommon.byteLength > 0) {
+                const jpac = JPA.parse(particleCommon);
+                renderer.effectSystem = new SimpleEffectSystem(device, jpac);
             }
 
             return modelCache.waitForLoad().then(() => {
@@ -858,20 +938,20 @@ class SceneDesc {
         }
     }
 
-    private spawnObjectsForActor(device: GfxDevice, abortSignal: AbortSignal, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, name: string, parameters: number, localModelMatrix: mat4, worldModelMatrix: mat4): void {
+    private spawnObjectsForActor(device: GfxDevice, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, name: string, parameters: number, localModelMatrix: mat4, worldModelMatrix: mat4): void {
         const modelCache = renderer.modelCache;
         const stageName = this.id;
         const roomIdx = roomRenderer.roomIdx;
         const cache = renderer.renderHelper.renderInstManager.gfxRenderCache;
 
-        function fetchArchive(objArcName: string): Progressable<RARC.RARC> {
-            return renderer.modelCache.fetchArchive(`${pathBase}/Object/${objArcName}`, abortSignal);
+        function fetchArchive(objArcName: string): Promise<RARC.RARC> {
+            return renderer.modelCache.fetchArchive(`${pathBase}/Object/${objArcName}`);
         }
 
-        let _extraSymbols: Progressable<SymbolMap> | null = null;
-        function fetchExtraSymbols(): Progressable<SymbolMap> {
+        let _extraSymbols: Promise<SymbolMap> | null = null;
+        function fetchExtraSymbols(): Promise<SymbolMap> {
             if (_extraSymbols === null) {
-                _extraSymbols = renderer.modelCache.fetchFileData(`${pathBase}/extra.crg1_arc`, abortSignal).then((data) => {
+                _extraSymbols = renderer.modelCache.fetchFileData(`${pathBase}/extra.crg1_arc`).then((data) => {
                     return BYML.parse<SymbolMap>(data, BYML.FileType.CRG1);
                 });
             }
@@ -1059,8 +1139,7 @@ class SceneDesc {
         // The King of Hyrule
         else if (name === 'Hi1') fetchArchive(`Hi.arc`).then((rarc) => buildModel(rarc, `bdlm/hi.bdl`).bindANK1(parseBCK(rarc, `bcks/hi_wait01.bck`)));
         // Princess Zelda
-        else if (name === 'p_zelda') fetchArchive(`Pz.arc`).then((rarc) => 
-        {
+        else if (name === 'p_zelda') fetchArchive(`Pz.arc`).then((rarc) => {
             const m = buildModel(rarc, `bdlm/pz.bdl`);            
             m.setMaterialColorWriteEnabled("m_pz_eyeLdamA", false);
             m.setMaterialColorWriteEnabled("m_pz_eyeLdamB", false);
@@ -1982,7 +2061,7 @@ class SceneDesc {
             console.warn(`Unknown object: ${name} ${hexzero(parameters, 8)}`);
     }
 
-    private spawnObjectsFromTGOBLayer(device: GfxDevice, abortSignal: AbortSignal, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, buffer: ArrayBufferSlice, tgobHeader: DZSChunkHeader | undefined, worldModelMatrix: mat4): void {
+    private spawnObjectsFromTGOBLayer(device: GfxDevice, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, buffer: ArrayBufferSlice, tgobHeader: DZSChunkHeader | undefined, worldModelMatrix: mat4): void {
         if (tgobHeader === undefined)
             return;
 
@@ -2003,13 +2082,13 @@ class SceneDesc {
             localModelMatrix[13] += posY;
             localModelMatrix[14] += posZ;
 
-            this.spawnObjectsForActor(device, abortSignal, renderer, roomRenderer, name, parameters, localModelMatrix, worldModelMatrix);
+            this.spawnObjectsForActor(device, renderer, roomRenderer, name, parameters, localModelMatrix, worldModelMatrix);
 
             actrTableIdx += 0x20;
         }
     }
 
-    private spawnObjectsFromACTRLayer(device: GfxDevice, abortSignal: AbortSignal, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, buffer: ArrayBufferSlice, actrHeader: DZSChunkHeader | undefined, worldModelMatrix: mat4): void {
+    private spawnObjectsFromACTRLayer(device: GfxDevice, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, buffer: ArrayBufferSlice, actrHeader: DZSChunkHeader | undefined, worldModelMatrix: mat4): void {
         if (actrHeader === undefined)
             return;
 
@@ -2033,30 +2112,30 @@ class SceneDesc {
             localModelMatrix[13] += posY;
             localModelMatrix[14] += posZ;
 
-            this.spawnObjectsForActor(device, abortSignal, renderer, roomRenderer, name, parameters, localModelMatrix, worldModelMatrix);
+            this.spawnObjectsForActor(device, renderer, roomRenderer, name, parameters, localModelMatrix, worldModelMatrix);
 
             actrTableIdx += 0x20;
         }
     }
 
-    private spawnObjectsFromDZR(device: GfxDevice, abortSignal: AbortSignal, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, buffer: ArrayBufferSlice, modelMatrix: mat4): void {
+    private spawnObjectsFromDZR(device: GfxDevice, renderer: WindWakerRenderer, roomRenderer: WindWakerRoomRenderer, buffer: ArrayBufferSlice, modelMatrix: mat4): void {
         const chunkHeaders = parseDZSHeaders(buffer);
 
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACTR'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT0'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT1'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT2'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT3'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT4'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT5'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT6'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT7'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT8'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACT9'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACTA'), modelMatrix);
-        this.spawnObjectsFromACTRLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('ACTB'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACTR'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT0'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT1'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT2'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT3'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT4'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT5'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT6'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT7'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT8'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACT9'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACTA'), modelMatrix);
+        this.spawnObjectsFromACTRLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('ACTB'), modelMatrix);
 
-        this.spawnObjectsFromTGOBLayer(device, abortSignal, renderer, roomRenderer, buffer, chunkHeaders.get('TGOB'), modelMatrix);
+        this.spawnObjectsFromTGOBLayer(device, renderer, roomRenderer, buffer, chunkHeaders.get('TGOB'), modelMatrix);
     }
 }
 

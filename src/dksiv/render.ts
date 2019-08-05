@@ -6,13 +6,11 @@ import * as Viewer from '../viewer';
 import * as UI from '../ui';
 
 import * as IV from './iv';
-import { GfxDevice, GfxBufferUsage, GfxBufferFrequencyHint, GfxBuffer, GfxInputState, GfxFormat, GfxInputLayout, GfxProgram, GfxBindingLayoutDescriptor, GfxRenderPipeline, GfxRenderPass, GfxBindings, GfxHostAccessPass, GfxVertexAttributeFrequency } from '../gfx/platform/GfxPlatform';
+import { GfxDevice, GfxBufferUsage, GfxBuffer, GfxInputState, GfxFormat, GfxInputLayout, GfxProgram, GfxBindingLayoutDescriptor, GfxRenderPass, GfxBindings, GfxHostAccessPass, GfxVertexAttributeFrequency } from '../gfx/platform/GfxPlatform';
 import { fillColor, fillMatrix4x4 } from '../gfx/helpers/UniformBufferHelpers';
 import { BasicRenderTarget, standardFullClearRenderPassDescriptor } from '../gfx/helpers/RenderTargetHelpers';
-import { GfxRenderBuffer } from '../gfx/render/GfxRenderBuffer';
-import { assert } from '../util';
 import { makeStaticDataBuffer } from '../gfx/helpers/BufferHelpers';
-import { GfxRenderInstManager, GfxRenderInst } from '../gfx/render/GfxRenderer2';
+import { GfxRenderInstManager } from '../gfx/render/GfxRenderer2';
 import { GfxRenderDynamicUniformBuffer } from '../gfx/render/GfxRenderDynamicUniformBuffer';
 
 class IVProgram extends DeviceProgram {
@@ -66,7 +64,7 @@ class Chunk {
     public nrmBuffer: GfxBuffer;
     public inputState: GfxInputState;
 
-    constructor(device: GfxDevice, public chunk: IV.Chunk, inputLayout: GfxInputLayout) {
+    constructor(device: GfxDevice, public chunk: IV.Chunk, private inputLayout: GfxInputLayout) {
         // Run through our data, calculate normals and such.
         const t = vec3.create();
 
@@ -123,9 +121,9 @@ class Chunk {
         this.numVertices = chunk.indexData.length;
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager): void {
+    public prepareToRender(renderInstManager: GfxRenderInstManager): void {
         const renderInst = renderInstManager.pushRenderInst();
-        renderInst.setInputState(device, this.inputState);
+        renderInst.setInputLayoutAndState(this.inputLayout, this.inputState);
         renderInst.drawPrimitives(this.numVertices);
     }
 
@@ -153,7 +151,7 @@ export class IVRenderer {
         this.visible = v;
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager): void {
+    public prepareToRender(renderInstManager: GfxRenderInstManager): void {
         if (!this.visible)
             return;
 
@@ -164,7 +162,7 @@ export class IVRenderer {
         offs += fillColor(d, offs, this.iv.color);
 
         for (let i = 0; i < this.chunks.length; i++)
-            this.chunks[i].prepareToRender(device, renderInstManager);
+            this.chunks[i].prepareToRender(renderInstManager);
 
         renderInstManager.popTemplateRenderInst();
     }
@@ -216,7 +214,7 @@ export class Scene implements Viewer.SceneGfx {
         offs += fillMatrix4x4(mapped, offs, viewerInput.camera.viewMatrix);
 
         for (let i = 0; i < this.ivRenderers.length; i++)
-            this.ivRenderers[i].prepareToRender(device, this.renderInstManager);
+            this.ivRenderers[i].prepareToRender(this.renderInstManager);
 
         this.renderInstManager.popTemplateRenderInst();
 

@@ -1,12 +1,12 @@
 
 import { mat4, vec3 } from 'gl-matrix';
 import ArrayBufferSlice from '../../ArrayBufferSlice';
-import Progressable from '../../Progressable';
 import { assert, assertExists, align, nArray } from '../../util';
-import { fetchData, AbortedError } from '../../fetch';
-import { MathConstants, computeModelMatrixSRT, lerp, computeNormalMatrix } from '../../MathHelpers';
+import { DataFetcher, DataFetcherFlags } from '../../DataFetcher';
+import { MathConstants, computeModelMatrixSRT, lerp, computeNormalMatrix, clamp, computeEulerAngleRotationFromSRTMatrix } from '../../MathHelpers';
 import { getPointBezier } from '../../Spline';
-import { Camera } from '../../Camera';
+import { Camera, computeClipSpacePointFromWorldSpacePoint } from '../../Camera';
+import { SceneContext } from '../../SceneBase';
 import * as Viewer from '../../viewer';
 import * as UI from '../../ui';
 
@@ -25,7 +25,7 @@ import AnimationController from '../../AnimationController';
 import { EFB_WIDTH, EFB_HEIGHT } from '../../gx/gx_material';
 import { MaterialParams, PacketParams } from '../../gx/gx_render';
 import { LoadedVertexData, LoadedVertexLayout } from '../../gx/gx_displaylist';
-import { GXRenderHelperGfx } from '../../gx/gx_render_2';
+import { GXRenderHelperGfx } from '../../gx/gx_render';
 import { BMD, BRK, BTK, BCK, LoopMode, BVA, BTP, BPK, JSystemFileReaderHelper, ShapeDisplayFlags } from '../../j3d/j3d';
 import { BMDModel, BMDModelInstance, MaterialInstance } from '../../j3d/render';
 import { JMapInfoIter, createCsvParser, getJMapInfoTransLocal, getJMapInfoRotateLocal, getJMapInfoScale } from './JMapInfo';
@@ -305,6 +305,8 @@ class SMGRenderer implements Viewer.SceneGfx {
         const executor = this.sceneObjHolder.sceneNameObjListExecutor;
         const camera = viewerInput.camera;
 
+        camera.setClipPlanes(100, 800000);
+
         executor.executeMovement(this.sceneObjHolder, viewerInput);
         executor.executeCalcAnim(this.sceneObjHolder, viewerInput);
 
@@ -312,10 +314,6 @@ class SMGRenderer implements Viewer.SceneGfx {
         this.sceneTexture.setParameters(device, viewerInput.viewportWidth, viewerInput.viewportHeight);
 
         this.sceneObjHolder.captureSceneDirector.opaqueSceneTexture = this.sceneTexture.gfxTexture;
-
-        // TODO(jstpierre): This is a very messy combination of the legacy render path and the new render path.
-        // Anything in `sceneGraph` is legacy, the new stuff uses the drawBufferHolder.
-        viewerInput.camera.setClipPlanes(100, 800000);
 
         const template = this.renderHelper.pushTemplateRenderInst();
         this.renderHelper.fillSceneParams(viewerInput, template);
@@ -358,8 +356,8 @@ class SMGRenderer implements Viewer.SceneGfx {
         // drawOpa(0x21); drawXlu(0x21);
         // XXX(jstpierre): Crystal is here? It seems like it uses last frame's indirect texture, which makes sense...
         // but are we sure crystals draw before everything else?
-        this.drawOpa(passRenderer, DrawBufferType.CRYSTAL);
-        this.drawXlu(passRenderer, DrawBufferType.CRYSTAL);
+        // XXX(jstpierre): This doesn't jive with the cleared depth buffer, so I'm moving it to right after we draw the prior airs...
+        // are prior airs just incompatible with crystals?
         // drawOpa(0x20); drawXlu(0x20);
         // drawOpa(0x23); drawXlu(0x23);
 
@@ -378,6 +376,9 @@ class SMGRenderer implements Viewer.SceneGfx {
         passRenderer.endPass(null);
         device.submitPass(passRenderer);
         passRenderer = this.mainRenderTarget.createRenderPass(device, depthClearRenderPassDescriptor);
+
+        this.drawOpa(passRenderer, DrawBufferType.CRYSTAL);
+        this.drawXlu(passRenderer, DrawBufferType.CRYSTAL);
 
         this.drawOpa(passRenderer, DrawBufferType.PLANET);
         this.drawOpa(passRenderer, 0x05); // planet strong light?
@@ -468,10 +469,11 @@ class SMGRenderer implements Viewer.SceneGfx {
         this.drawXlu(passRenderer, 0x22);
         this.drawXlu(passRenderer, 0x17);
         this.drawXlu(passRenderer, 0x16);
+        this.execute(passRenderer, DrawType.EFFECT_DRAW_INDIRECT);
         this.execute(passRenderer, DrawType.EFFECT_DRAW_AFTER_INDIRECT);
 
         // executeDrawImageEffect()
-        if (this.isNormalBloomOn()) {
+        if (this.isNormalBloomOn() && this.bloomRenderer.pipelinesReady(device)) {
             passRenderer.endPass(null);
             device.submitPass(passRenderer);
 
@@ -503,12 +505,9 @@ class SMGRenderer implements Viewer.SceneGfx {
     }
 
     public destroy(device: GfxDevice): void {
-        this.spawner.destroy(device);
-
         this.mainRenderTarget.destroy(device);
         this.sceneTexture.destroy(device);
         this.bloomRenderer.destroy(device);
-        this.renderHelper.destroy(device);
     }
 }
 
@@ -727,36 +726,20 @@ function patchBMDModel(bmdModel: BMDModel): void {
 }
 
 export class ModelCache {
-    public archiveProgressableCache = new Map<string, Progressable<RARC.RARC | null>>();
+    public archivePromiseCache = new Map<string, Promise<RARC.RARC | null>>();
     public archiveCache = new Map<string, RARC.RARC | null>();
     public modelCache = new Map<string, BMDModel | null>();
     private models: BMDModel[] = [];
-    private destroyed: boolean = false;
 
-    constructor(public device: GfxDevice, public cache: GfxRenderCache, private pathBase: string, private abortSignal: AbortSignal) {
+    constructor(public device: GfxDevice, public cache: GfxRenderCache, private pathBase: string, private dataFetcher: DataFetcher) {
     }
 
-    public waitForLoad(): Progressable<any> {
-        const v: Progressable<any>[] = [... this.archiveProgressableCache.values()];
-        return Progressable.all(v);
+    public waitForLoad(): Promise<void> {
+        const v: Promise<any>[] = [... this.archivePromiseCache.values()];
+        return Promise.all(v) as Promise<any>;
     }
 
-    public getModel(archivePath: string, modelFilename: string): Progressable<BMDModel | null> {
-        if (this.modelCache.has(modelFilename))
-            return Progressable.resolve(this.modelCache.get(modelFilename));
-
-        const p = this.requestArchiveData(archivePath).then((rarc: RARC.RARC) => {
-            if (rarc === null)
-                return null;
-            if (this.destroyed)
-                throw new AbortedError();
-            return this.getModel2(rarc, modelFilename);
-        });
-
-        return p;
-    }
-
-    public getModel2(rarc: RARC.RARC, modelFilename: string): BMDModel | null {
+    public getModel(rarc: RARC.RARC, modelFilename: string): BMDModel | null {
         if (this.modelCache.has(modelFilename))
             return this.modelCache.get(modelFilename);
 
@@ -769,11 +752,11 @@ export class ModelCache {
         return bmdModel;
     }
 
-    public requestArchiveData(archivePath: string): Progressable<RARC.RARC | null> {
-        if (this.archiveProgressableCache.has(archivePath))
-            return this.archiveProgressableCache.get(archivePath);
+    public requestArchiveData(archivePath: string): Promise<RARC.RARC | null> {
+        if (this.archivePromiseCache.has(archivePath))
+            return this.archivePromiseCache.get(archivePath);
 
-        const p = fetchData(`${this.pathBase}/${archivePath}`, this.abortSignal).then((buffer: ArrayBufferSlice) => {
+        const p = this.dataFetcher.fetchData(`${this.pathBase}/${archivePath}`, DataFetcherFlags.ALLOW_404).then((buffer: ArrayBufferSlice) => {
             if (buffer.byteLength === 0) {
                 console.warn(`Could not fetch archive ${archivePath}`);
                 return null;
@@ -785,7 +768,7 @@ export class ModelCache {
             return rarc;
         });
 
-        this.archiveProgressableCache.set(archivePath, p);
+        this.archivePromiseCache.set(archivePath, p);
         return p;
     }
 
@@ -797,8 +780,8 @@ export class ModelCache {
         return assertExists(this.archiveCache.get(archivePath));
     }
 
-    public requestObjectData(objectName: string): void {
-        this.requestArchiveData(`ObjectData/${objectName}.arc`);
+    public requestObjectData(objectName: string) {
+        return this.requestArchiveData(`ObjectData/${objectName}.arc`);
     }
 
     public isObjectDataExist(objectName: string): boolean {
@@ -810,7 +793,6 @@ export class ModelCache {
     }
 
     public destroy(device: GfxDevice): void {
-        this.destroyed = true;
         for (let i = 0; i < this.models.length; i++)
             this.models[i].destroy(device);
     }
@@ -1000,6 +982,95 @@ class CaptureSceneDirector {
     }
 }
 
+export class Dot {
+    public elem: HTMLElement;
+
+    private x: number = 0;
+    private y: number = 0;
+    private radius: number = 0;
+
+    public minRadius = 4;
+    public maxRadius = 50;
+
+    constructor(private uiSystem: UISystem) {
+        this.elem = document.createElement('div');
+        this.elem.style.position = 'absolute';
+        this.elem.style.borderRadius = '100%';
+        this.elem.style.backgroundColor = '#ff00ff';
+        this.elem.style.pointerEvents = 'auto';
+        this.elem.style.cursor = 'pointer';
+        this.elem.style.transition = 'background-color .15s ease-out';
+        this.elem.style.boxShadow = '0px 0px 10px rgba(0, 0, 0, 0.6)';
+        this.elem.onmouseover = () => {
+            this.elem.style.backgroundColor = 'white';
+        };
+        this.elem.onmouseout = () => {
+            this.elem.style.backgroundColor = '#ff00ff';
+        };
+
+        this.uiSystem.uiContainer.appendChild(this.elem);
+    }
+
+    public setWorldPosition(camera: Camera, translation: vec3): void {
+        computeClipSpacePointFromWorldSpacePoint(scratchVec3, camera, translation);
+
+        const screenX = this.uiSystem.convertViewToScreenX(scratchVec3[0]);
+        const screenY = this.uiSystem.convertViewToScreenY(scratchVec3[1]);
+        const radiusRamp = (1.0 - scratchVec3[2]);
+        const radius = clamp(this.maxRadius * radiusRamp, this.minRadius, this.maxRadius);
+        const visible = scratchVec3[2] <= 1.0;
+        this.setScreenPosition(screenX, screenY, radius, visible);
+    }
+
+    private setScreenPosition(x: number, y: number, radius: number, visible: boolean): void {
+        if (visible) {
+            if (x === this.x && y === this.y && radius === this.radius)
+                return;
+
+            this.x = x;
+            this.y = y;
+            this.radius = radius;
+
+            // Clip.
+            const padLeft = radius;
+            const padRight = -radius;
+            const padTop = radius;
+            const padBottom = -radius;
+            visible = (((this.x + padLeft) > 0) && ((this.x + padRight) < this.uiSystem.convertViewToScreenX(1.0)) &&
+                       ((this.y + padTop) > 0) && ((this.y + padBottom) < this.uiSystem.convertViewToScreenY(-1.0)));
+        }
+
+        if (visible) {
+            this.elem.style.left = `${x - radius}px`;
+            this.elem.style.top = `${y - radius}px`;
+            this.elem.style.width = `${radius * 2}px`;
+            this.elem.style.height = `${radius * 2}px`;
+            this.elem.style.display = 'block';
+        } else {
+            this.elem.style.display = 'none';
+        }
+    }
+}
+
+export class UISystem {
+    constructor(public uiContainer: HTMLElement) {
+    }
+
+    public convertViewToScreenX(v: number) {
+        const w = window.innerWidth;
+        return (v * 0.5 + 0.5) * w;
+    }
+
+    public convertViewToScreenY(v: number) {
+        const h = window.innerHeight;
+        return (-v * 0.5 + 0.5) * h;
+    }
+
+    public createDot(): Dot {
+        return new Dot(this);
+    }
+}
+
 export class SceneObjHolder {
     public sceneDesc: SMGSceneDescBase;
     public modelCache: ModelCache;
@@ -1017,8 +1088,11 @@ export class SceneObjHolder {
     // on the same singleton, but c'est la vie...
     public sceneNameObjListExecutor: SceneNameObjListExecutor;
 
+    public uiSystem: UISystem;
+
     public destroy(device: GfxDevice): void {
         this.modelCache.destroy(device);
+        this.sceneNameObjListExecutor.destroy(device);
 
         if (this.effectSystem !== null)
             this.effectSystem.destroy(device);
@@ -1056,27 +1130,6 @@ export function getJMapInfoTrans(dst: vec3, sceneObjHolder: SceneObjHolder, info
     vec3.transformMat4(dst, dst, stageDataHolder.placementMtx);
 }
 
-function matrixExtractEulerAngleRotation(dst: vec3, m: mat4): void {
-    // In SMG, this appears inline in getJMapInfoRotate. It appears to be a simplified form of
-    // "Euler Angle Conversion", Ken Shoemake, Graphics Gems IV. http://www.gregslabaugh.net/publications/euler.pdf
-
-    if (m[2] - 1.0 < -0.0001) {
-        if (m[2] + 1.0 > 0.0001) {
-            dst[0] = Math.atan2(m[6], m[10]);
-            dst[1] = -Math.asin(m[2]);
-            dst[2] = Math.atan2(m[1], m[0]);
-        } else {
-            dst[0] = Math.atan2(m[4], m[8]);
-            dst[1] = Math.PI / 2;
-            dst[2] = 0.0;
-        }
-    } else {
-        dst[0] = -Math.atan2(-m[4], -m[8]);
-        dst[1] = -Math.PI / 2;
-        dst[2] = 0.0;
-    }
-}
-
 const scratchMatrix = mat4.create();
 function getJMapInfoRotate(dst: vec3, sceneObjHolder: SceneObjHolder, infoIter: JMapInfoIter, scratch: mat4 = scratchMatrix): void {
     getJMapInfoRotateLocal(dst, infoIter);
@@ -1086,7 +1139,7 @@ function getJMapInfoRotate(dst: vec3, sceneObjHolder: SceneObjHolder, infoIter: 
     const stageDataHolder = sceneObjHolder.stageDataHolder.findPlacedStageDataHolder(infoIter);
     mat4.mul(scratch, stageDataHolder.placementMtx, scratch);
 
-    matrixExtractEulerAngleRotation(dst, scratch);
+    computeEulerAngleRotationFromSRTMatrix(dst, scratch);
 }
 
 export class LiveActor extends NameObj {
@@ -1161,7 +1214,7 @@ export class LiveActor extends NameObj {
 
         this.arc = modelCache.getObjectData(objName);
 
-        const bmdModel = modelCache.getModel2(this.arc, `${objName}.bdl`);
+        const bmdModel = modelCache.getModel(this.arc, `${objName}.bdl`);
         this.modelInstance = new BMDModelInstance(bmdModel);
         this.modelInstance.name = objName;
         this.modelInstance.animationController.fps = FPS;
@@ -1310,7 +1363,6 @@ export class LiveActor extends NameObj {
 
 import { NPCDirector, MiniRoutePoint, createModelObjMapObj, bindColorChangeAnimation, bindTexChangeAnimation, isExistIndirectTexture, connectToSceneIndirectMapObjStrongLight, connectToSceneMapObjStrongLight, connectToSceneSky, connectToSceneBloom, MiniRouteGalaxy, MiniRoutePart } from './Actors';
 import { getNameObjTableEntry, PlanetMapCreator } from './ActorTable';
-import { prepareFrameDebugOverlayCanvas2D } from '../../DebugJunk';
 
 // Random actor for other things that otherwise do not have their own actors.
 class NoclipLegacyActor extends LiveActor {
@@ -1531,14 +1583,12 @@ class SMGSpawner {
         };
     
         const spawnGraph = (arcName: string, tag: SceneGraphTag = SceneGraphTag.Normal, animOptions: AnimOptions | null | undefined = undefined) => {
-            const arcPath = `ObjectData/${arcName}.arc`;
-            const modelFilename = `${arcName}.bdl`;
-
-            return modelCache.getModel(arcPath, modelFilename).then((bmdModel): [NoclipLegacyActor, RARC.RARC] => {
-                // If this is a 404, then return null.
-                if (bmdModel === null)
+            return modelCache.requestObjectData(arcName).then((data): [NoclipLegacyActor, RARC.RARC] | null => {
+                if (data === null) {
+                    // Received a 404.
                     return null;
-
+                }
+                
                 const actor = new NoclipLegacyActor(zoneAndLayer, arcName, this.sceneObjHolder, infoIter, tag, objinfo);
                 applyAnimations(actor, animOptions);
 
@@ -1547,10 +1597,6 @@ class SMGSpawner {
 
                 return [actor, actor.arc];
             });
-        };
-
-        const spawnDefault = (name: string): void => {
-            spawnGraph(name, SceneGraphTag.Normal);
         };
 
         const name = objinfo.objName;
@@ -1939,7 +1985,7 @@ class SMGSpawner {
             spawnGraph(name, SceneGraphTag.Normal, { });
             break;
         default:
-            spawnDefault(name);
+            spawnGraph(name);
             break;
         }
     }
@@ -2383,10 +2429,12 @@ export abstract class SMGSceneDescBase implements Viewer.SceneDesc {
     public abstract requestGlobalArchives(modelCache: ModelCache): void;
     public abstract requestZoneArchives(modelCache: ModelCache, zoneName: string): void;
 
-    public createScene(device: GfxDevice, abortSignal: AbortSignal): Progressable<Viewer.SceneGfx> {
+    public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         const renderHelper = new GXRenderHelperGfx(device);
+        context.destroyablePool.push(renderHelper);
+
         const gfxRenderCache = renderHelper.renderInstManager.gfxRenderCache;
-        const modelCache = new ModelCache(device, gfxRenderCache, this.pathBase, abortSignal);
+        const modelCache = new ModelCache(device, gfxRenderCache, this.pathBase, context.dataFetcher);
 
         const galaxyName = this.galaxyName;
 
@@ -2400,6 +2448,8 @@ export abstract class SMGSceneDescBase implements Viewer.SceneDesc {
         modelCache.requestObjectData('NPCData');
 
         const sceneObjHolder = new SceneObjHolder();
+        sceneObjHolder.uiSystem = new UISystem(context.uiContainer);
+        context.destroyablePool.push(sceneObjHolder);
 
         return modelCache.waitForLoad().then(() => {
             const scenarioData = new ScenarioData(modelCache.getArchive(scenarioDataFilename));
@@ -2433,6 +2483,7 @@ export abstract class SMGSceneDescBase implements Viewer.SceneDesc {
                 sceneObjHolder.messageDataHolder = null;
 
             const spawner = new SMGSpawner(galaxyName, this.pathBase, sceneObjHolder);
+            context.destroyablePool.push(spawner);
             spawner.requestArchives();
 
             return modelCache.waitForLoad().then(() => {

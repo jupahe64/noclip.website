@@ -14,8 +14,8 @@ import { assert } from "../../util";
 import { makeStaticDataBuffer } from "../../gfx/helpers/BufferHelpers";
 import { getVertexAttribLocation, GXMaterial, ColorChannelControl, TexGen, IndTexStage, TevStage } from "../../gx/gx_material";
 import * as GX from "../../gx/gx_enum";
-import { GXRenderHelperGfx, GXMaterialHelperGfx, autoOptimizeMaterial } from "../../gx/gx_render_2";
-import { MaterialParams, PacketParams, ColorKind, setTevOrder, setTevColorIn, setTevColorOp, setTevAlphaIn, setTevAlphaOp, setTevIndWarp, setIndTexOrder, setIndTexCoordScale, ub_MaterialParams, u_MaterialParamsBufferSize, u_PacketParamsBufferSize, ub_PacketParams, fillPacketParamsData } from "../../gx/gx_render";
+import { GXRenderHelperGfx, GXMaterialHelperGfx, autoOptimizeMaterial } from "../../gx/gx_render";
+import { MaterialParams, PacketParams, ColorKind, setTevOrder, setTevColorIn, setTevColorOp, setTevAlphaIn, setTevAlphaOp, setTevIndWarp, setIndTexOrder, setIndTexCoordScale, ub_MaterialParams, u_PacketParamsBufferSize, ub_PacketParams, fillPacketParamsData } from "../../gx/gx_render";
 import { Camera } from "../../Camera";
 import { makeSortKey, GfxRendererLayer } from "../../gfx/render/GfxRenderer";
 import { createFilterKeyForDrawType, DrawType } from "./NameObj";
@@ -445,6 +445,7 @@ export class OceanBowl extends LiveActor {
         this.mask.destroy(device);
         device.destroyBuffer(this.positionBuffer);
         device.destroyBuffer(this.colorBuffer);
+        device.destroyBuffer(this.texCoord0Buffer);
         device.destroyBuffer(this.indexBuffer);
         device.destroyInputLayout(this.inputLayout);
         device.destroyInputState(this.inputState);

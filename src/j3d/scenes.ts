@@ -9,9 +9,8 @@ import { BMD, BMT, BTK, BRK, BCK } from './j3d';
 import * as Yaz0 from '../compression/Yaz0';
 import * as RARC from './rarc';
 import { BMDModelInstance, BMDModel } from './render';
-import { GfxRenderInstViewRenderer } from '../gfx/render/GfxRenderer';
 import { BasicRenderTarget, standardFullClearRenderPassDescriptor } from '../gfx/helpers/RenderTargetHelpers';
-import { GXRenderHelperGfx } from '../gx/gx_render_2';
+import { GXRenderHelperGfx } from '../gx/gx_render';
 import { GfxDevice, GfxHostAccessPass, GfxRenderPass } from '../gfx/platform/GfxPlatform';
 import { GXMaterialHacks } from '../gx/gx_material';
 import { GfxRenderCache } from '../gfx/render/GfxRenderCache';
@@ -54,8 +53,6 @@ export class BasicRenderer implements Viewer.SceneGfx {
 
     private prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
         const renderInstManager = this.renderHelper.renderInstManager;
-
-        viewerInput.camera.setClipPlanes(20, 500000);
 
         const template = this.renderHelper.pushTemplateRenderInst();
         this.renderHelper.fillSceneParams(viewerInput, template);

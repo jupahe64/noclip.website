@@ -2,7 +2,7 @@
 // Misc actors that aren't big enough to have their own file.
 
 import { LightType } from './DrawBuffer';
-import { SceneObjHolder, LiveActor, ZoneAndLayer, getObjectName, startBtkIfExist, startBvaIfExist, WorldmapPointInfo, startBrkIfExist, getDeltaTimeFrames, getTimeFrames, startBck, startBpkIfExist, startBtpIfExist, NameObjFactory } from './smg_scenes';
+import { SceneObjHolder, LiveActor, ZoneAndLayer, getObjectName, startBtkIfExist, startBvaIfExist, WorldmapPointInfo, startBrkIfExist, getDeltaTimeFrames, getTimeFrames, startBck, startBpkIfExist, startBtpIfExist, NameObjFactory, Dot } from './smg_scenes';
 import { createCsvParser, JMapInfoIter, getJMapInfoArg0, getJMapInfoArg1, getJMapInfoArg2, getJMapInfoArg3, getJMapInfoArg4, getJMapInfoArg6, getJMapInfoArg7 } from './JMapInfo';
 import { mat4, vec3 } from 'gl-matrix';
 import AnimationController from '../../AnimationController';
@@ -652,11 +652,8 @@ export class StarPiece extends LiveActor {
 
     public calcAndSetBaseMtx(viewerInput: Viewer.ViewerRenderInput): void {
         // The star piece rotates around the Y axis at 15 degrees every frame.
-        const enum Constants {
-            SPEED = MathConstants.DEG_TO_RAD * 15,
-        }
-
-        this.rotation[1] += getDeltaTimeFrames(viewerInput) * Constants.SPEED;
+        const SPEED = MathConstants.DEG_TO_RAD * 15;
+        this.rotation[1] += getDeltaTimeFrames(viewerInput) * SPEED;
         super.calcAndSetBaseMtx(viewerInput);
     }
 }
@@ -1004,12 +1001,8 @@ export class Coin extends LiveActor {
         //   - getCoinInWaterRotateYMatrix()
         //   - getCoinHiSpeedRotateYMatrix()
         // for now we just spin at 4 degrees per frame lol
-
-        const enum Constants {
-            SPEED = MathConstants.DEG_TO_RAD * 4,
-        };
-
-        const rotationY = getTimeFrames(viewerInput) * Constants.SPEED;
+        const SPEED = MathConstants.DEG_TO_RAD * 4;
+        const rotationY = getTimeFrames(viewerInput) * SPEED;
         computeModelMatrixSRT(scratchMatrix, 1, 1, 1, 0, rotationY, 0, 0, 0, 0);
         super.calcAndSetBaseMtx(viewerInput);
         mat4.mul(this.modelInstance.modelMatrix, this.modelInstance.modelMatrix, scratchMatrix);
@@ -1057,7 +1050,7 @@ export class MiniRouteGalaxy extends LiveActor {
             infoIter.getValueNumber('PosOffsetZ'));
 
         vec3.add(this.translation, pointInfo.position, miniatureOffset);
-        // vec3.set(this.scale, miniatureScale, miniatureScale, miniatureScale);
+        vec3.set(this.scale, miniatureScale, miniatureScale, miniatureScale);
 
         this.initModelManagerWithAnm(sceneObjHolder, miniatureName);
         this.initEffectKeeper(sceneObjHolder, null);
@@ -1424,6 +1417,8 @@ export class AstroCountDownPlate extends LiveActor {
 }
 
 export class Butler extends NPCActor {
+    private dot: Dot | null = null;
+
     constructor(zoneAndLayer: ZoneAndLayer, sceneObjHolder: SceneObjHolder, infoIter: JMapInfoIter) {
         super(zoneAndLayer, getObjectName(infoIter));
 
@@ -1436,6 +1431,18 @@ export class Butler extends NPCActor {
         const location = getJMapInfoArg0(infoIter);
 
         this.startAction('Wait');
+
+        // this.dot = sceneObjHolder.uiSystem.createDot();
+    }
+
+    public movement(sceneObjHolder: SceneObjHolder, viewerInput: Viewer.ViewerRenderInput): void {
+        super.movement(sceneObjHolder, viewerInput);
+
+        if (this.dot !== null) {
+            vec3.copy(scratchVec3, this.translation);
+            scratchVec3[1] += 50;
+            this.dot.setWorldPosition(viewerInput.camera, scratchVec3);
+        }
     }
 }
 
@@ -1583,6 +1590,8 @@ export class ShootingStar extends LiveActor {
     public movement(sceneObjHolder: SceneObjHolder, viewerInput: Viewer.ViewerRenderInput): void {
         super.movement(sceneObjHolder, viewerInput);
 
+        const SPEED = 10 * MathConstants.DEG_TO_RAD;
+        this.rotation[1] = (this.rotation[1] + (SPEED * getDeltaTimeFrames(viewerInput))) % MathConstants.TAU;
         const currentNerve = this.getCurrentNerve();
 
         if (currentNerve === ShootingStarNrv.PRE_SHOOTING) {

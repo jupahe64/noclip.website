@@ -41,9 +41,14 @@ export function readString(buffer: ArrayBufferSlice, offs: number, length: numbe
     return S;
 }
 
+// Requires that multiple is a power of two.
 export function align(n: number, multiple: number): number {
     const mask = (multiple - 1);
     return (n + mask) & ~mask;
+}
+
+export function alignNonPowerOfTwo(n: number, multiple: number): number {
+    return (((n + multiple - 1) / multiple) | 0) * multiple;
 }
 
 export function nArray<T>(n: number, c: () => T): T[] {
@@ -98,4 +103,9 @@ export function hexdump(b_: ArrayBufferSlice | ArrayBuffer, offs: number = 0, le
 
 export function wordCountFromByteCount(byteCount: number): number {
     return align(byteCount, 4) / 4;
+}
+
+export function concat<T>(dst: T[], src: T[]): void {
+    for (let i = 0; i < src.length; i++)
+        dst.push(src[i]);
 }

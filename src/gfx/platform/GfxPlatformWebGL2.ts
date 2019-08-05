@@ -1,5 +1,5 @@
 
-import { GfxBufferUsage, GfxBindingLayoutDescriptor, GfxBufferFrequencyHint, GfxTexFilterMode, GfxMipFilterMode, GfxPrimitiveTopology, GfxSwapChain, GfxDevice, GfxSamplerDescriptor, GfxWrapMode, GfxVertexBufferDescriptor, GfxRenderPipelineDescriptor, GfxBufferBinding, GfxSamplerBinding, GfxProgramReflection, GfxDeviceLimits, GfxVertexAttributeDescriptor, GfxRenderTargetDescriptor, GfxLoadDisposition, GfxRenderPass, GfxPass, GfxHostAccessPass, GfxMegaStateDescriptor, GfxCompareMode, GfxBlendMode, GfxCullMode, GfxBlendFactor, GfxFrontFaceMode, GfxInputStateReflection, GfxVertexAttributeFrequency, GfxRenderPassDescriptor, GfxTextureDescriptor, GfxTextureDimension, makeTextureDescriptor2D, GfxBindingsDescriptor, GfxDebugGroup, GfxInputLayoutDescriptor, GfxAttachmentState as GfxAttachmentStateDescriptor, GfxColorWriteMask } from './GfxPlatform';
+import { GfxBufferUsage, GfxBindingLayoutDescriptor, GfxBufferFrequencyHint, GfxTexFilterMode, GfxMipFilterMode, GfxPrimitiveTopology, GfxSwapChain, GfxDevice, GfxSamplerDescriptor, GfxWrapMode, GfxVertexBufferDescriptor, GfxRenderPipelineDescriptor, GfxBufferBinding, GfxSamplerBinding, GfxProgramReflection, GfxDeviceLimits, GfxVertexAttributeDescriptor, GfxLoadDisposition, GfxRenderPass, GfxPass, GfxHostAccessPass, GfxMegaStateDescriptor, GfxCompareMode, GfxBlendMode, GfxCullMode, GfxBlendFactor, GfxFrontFaceMode, GfxInputStateReflection, GfxVertexAttributeFrequency, GfxRenderPassDescriptor, GfxTextureDescriptor, GfxTextureDimension, makeTextureDescriptor2D, GfxBindingsDescriptor, GfxDebugGroup, GfxInputLayoutDescriptor, GfxAttachmentState as GfxAttachmentStateDescriptor, GfxColorWriteMask } from './GfxPlatform';
 import { _T, GfxBuffer, GfxTexture, GfxColorAttachment, GfxDepthStencilAttachment, GfxSampler, GfxProgram, GfxInputLayout, GfxInputState, GfxRenderPipeline, GfxBindings, GfxResource } from "./GfxPlatformImpl";
 import { GfxFormat, getFormatCompByteSize, FormatTypeFlags, FormatCompFlags, FormatFlags, getFormatTypeFlags, getFormatCompFlags } from "./GfxPlatformFormat";
 
@@ -8,6 +8,10 @@ import { assert, assertExists } from '../../util';
 import { copyMegaState, defaultMegaState, fullscreenMegaState } from '../helpers/GfxMegaStateDescriptorHelpers';
 import { IS_DEVELOPMENT } from '../../BuildVersion';
 import { White, colorEqual, colorCopy } from '../../Color';
+
+// This is a workaround for ANGLE not supporting UBOs greater than 64kb (the limit of D3D).
+// https://bugs.chromium.org/p/angleproject/issues/detail?id=3388
+const UBO_PAGE_BYTE_SIZE = 0x10000;
 
 export class FullscreenCopyProgram extends FullscreenProgram {
     public frag: string = `
@@ -498,7 +502,7 @@ function applyMegaState(gl: WebGL2RenderingContext, currentMegaState: GfxMegaSta
     }
 }
 
-const TRACK_RESOURCES = false && IS_DEVELOPMENT;
+const TRACK_RESOURCES = IS_DEVELOPMENT;
 class ResourceCreationTracker {
     public creationStacks = new Map<GfxResource, string>();
 
@@ -663,6 +667,10 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
             return WebGL2RenderingContext.RGBA32F;
         case GfxFormat.U16_R:
             return WebGL2RenderingContext.R16UI;
+        case GfxFormat.U8_RGB:
+            return WebGL2RenderingContext.RGB8;
+        case GfxFormat.U8_RGB_SRGB:
+            return WebGL2RenderingContext.SRGB8;
         case GfxFormat.U8_RGBA:
             return WebGL2RenderingContext.RGBA8;
         case GfxFormat.U8_RGBA_SRGB:
@@ -672,9 +680,9 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
         case GfxFormat.BC1:
             return this._WEBGL_compressed_texture_s3tc!.COMPRESSED_RGBA_S3TC_DXT1_EXT;
         case GfxFormat.BC1_SRGB:
-            return this._WEBGL_compressed_texture_s3tc!.COMPRESSED_RGBA_S3TC_DXT5_EXT;
+            return this._WEBGL_compressed_texture_s3tc_srgb!.COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
         case GfxFormat.BC3:
-            return this._WEBGL_compressed_texture_s3tc_srgb!.COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
+            return this._WEBGL_compressed_texture_s3tc!.COMPRESSED_RGBA_S3TC_DXT3_EXT;
         case GfxFormat.BC3_SRGB:
             return this._WEBGL_compressed_texture_s3tc_srgb!.COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
         default:
@@ -683,6 +691,19 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
     }
     
     private translateTextureFormat(fmt: GfxFormat): GLenum {
+        switch (fmt) {
+        case GfxFormat.BC1:
+            return this._WEBGL_compressed_texture_s3tc!.COMPRESSED_RGBA_S3TC_DXT1_EXT;
+        case GfxFormat.BC1_SRGB:
+            return this._WEBGL_compressed_texture_s3tc_srgb!.COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
+        case GfxFormat.BC3:
+            return this._WEBGL_compressed_texture_s3tc!.COMPRESSED_RGBA_S3TC_DXT3_EXT;
+        case GfxFormat.BC3_SRGB:
+            return this._WEBGL_compressed_texture_s3tc_srgb!.COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
+        default:
+            break;
+        }
+
         const compFlags: FormatCompFlags = getFormatCompFlags(fmt);
         switch (compFlags) {
         case FormatCompFlags.COMP_R:
@@ -800,10 +821,6 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
 
         let pageByteSize: number;
         if (usage === GfxBufferUsage.UNIFORM) {
-            // This is a workaround for ANGLE not supporting UBOs greater than 64kb (the limit of D3D).
-            // It seems like this is a bug because there is supposed to be code to handle it, but it doesn't appear to work.
-            const UBO_PAGE_BYTE_SIZE = 0x10000;
-
             assert((byteSize % UBO_PAGE_BYTE_SIZE) === 0);
             let byteSizeLeft = byteSize;
             while (byteSizeLeft > 0) {
@@ -1121,13 +1138,8 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
         const gl = this.gl;
         return {
             uniformBufferWordAlignment: gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) / 4,
-            uniformBufferMaxPageWordSize: gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE) / 4,
+            uniformBufferMaxPageWordSize: Math.min(gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE), UBO_PAGE_BYTE_SIZE) / 4,
         };
-    }
-
-    public queryProgram(program_: GfxProgram): GfxProgramReflection {
-        const program = program_ as GfxProgramP_GL;
-        return program.deviceProgram;
     }
 
     public queryInputState(inputState_: GfxInputState): GfxInputStateReflection {
@@ -1154,8 +1166,18 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
             return true;
         } else {
             if (this._KHR_parallel_shader_compile !== null) {
-                const glProgram = pipeline.program.deviceProgram.glProgram;
-                pipeline.ready = this.gl.getProgramParameter(glProgram, this._KHR_parallel_shader_compile.COMPLETION_STATUS_KHR);
+                const gl = this.gl;
+                const deviceProgram = pipeline.program.deviceProgram;
+                const prog = deviceProgram.glProgram;
+                pipeline.ready = gl.getProgramParameter(prog, this._KHR_parallel_shader_compile.COMPLETION_STATUS_KHR);
+
+                if (pipeline.ready) {
+                    if (IS_DEVELOPMENT && !gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                        console.error(deviceProgram.vert);
+                        console.error(deviceProgram.frag);
+                        console.error(gl.getProgramInfoLog(prog));
+                    }
+                }
             } else {
                 pipeline.ready = true;
             }
@@ -1427,6 +1449,7 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
 
     private setPipeline(pipeline: GfxRenderPipeline): void {
         this._currentPipeline = pipeline as GfxRenderPipelineP_GL;
+        assert(this.queryPipelineReady(this._currentPipeline));
         this._setMegaState(this._currentPipeline.megaState);
 
         // Hotpatch support.
