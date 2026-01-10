@@ -1,9 +1,9 @@
 
-import ArrayBufferSlice from "../ArrayBufferSlice";
-import { readString, assert } from "../util";
-import { isMarkerLittleEndian, readBinStr } from "./bfres";
-import { ImageDimension, ImageFormat, ImageStorageDimension, TileMode, getChannelFormat } from "./nngfx_enum";
-import { getBlockHeightLog2, getFormatBlockHeight } from "./tegra_texture";
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { readString, assert } from "../util.js";
+import { isMarkerLittleEndian, readBinStr } from "./bfres.js";
+import { ImageDimension, ImageFormat, ImageStorageDimension, TileMode, getChannelFormat } from "./nngfx_enum.js";
+import { getFormatBlockHeight, isChannelFormatSupported } from "./tegra_texture.js";
 
 export interface BNTX {
     textures: BRTI[];
@@ -18,9 +18,10 @@ export interface BRTI {
     depth: number;
     arraySize: number;
     mipBuffers: ArrayBufferSlice[];
+    blockHeightLog2: number;
 }
 
-function parseBRTI(buffer: ArrayBufferSlice, offs: number, littleEndian: boolean): BRTI {
+function parseBRTI(buffer: ArrayBufferSlice, offs: number, littleEndian: boolean): BRTI | null {
     const view = buffer.createDataView();
 
     assert(readString(buffer, offs + 0x00, 0x04) === 'BRTI');
@@ -42,9 +43,9 @@ function parseBRTI(buffer: ArrayBufferSlice, offs: number, littleEndian: boolean
     const arraySize = view.getUint32(offs + 0x30, littleEndian);
     // layout, the first element of which appears to be blockHeightLog2
     const blockHeightLog2 = view.getUint32(offs + 0x34, littleEndian);
-    const bh = getFormatBlockHeight(getChannelFormat(imageFormat));
-    const blockHeightLog2_2 = getBlockHeightLog2(height / bh);
-    assert(blockHeightLog2 === blockHeightLog2_2);
+    const channelFormat = getChannelFormat(imageFormat);
+    if (!isChannelFormatSupported(channelFormat))
+        return null;
 
     const textureDataSize = view.getUint32(offs + 0x50, littleEndian);
     const alignment = view.getUint32(offs + 0x54, littleEndian);
@@ -63,7 +64,7 @@ function parseBRTI(buffer: ArrayBufferSlice, offs: number, littleEndian: boolean
         mipBuffers.push(buffer.slice(dataOffsets[i], dataOffsets[i + 1]));
     mipBuffers.push(buffer.slice(dataOffsets[mipCount - 1], dataOffsets[0] + textureDataSize));
 
-    return { name, imageDimension, imageFormat, width, height, depth, arraySize, mipBuffers };
+    return { name, imageDimension, imageFormat, width, height, depth, arraySize, mipBuffers, blockHeightLog2 };
 }
 
 export function parse(buffer: ArrayBufferSlice): BNTX {
@@ -93,8 +94,10 @@ export function parse(buffer: ArrayBufferSlice): BNTX {
         const textureHeaderOffs = view.getUint32(textureArrIdx + 0x00, littleEndian);
 
         const brti = parseBRTI(buffer, textureHeaderOffs, littleEndian);
-        assert(brti.name === textureName);
-        textures.push(brti);
+        if (brti !== null) {
+            assert(brti.name === textureName);
+            textures.push(brti);
+        }
 
         textureDicIdx += 0x10;
         textureArrIdx += 0x08;

@@ -1,94 +1,101 @@
-import { assert } from "../../util";
 
-export const enum GfxTopology {
-    TRIANGLES, TRISTRIP, TRIFAN, QUADS, QUADSTRIP,
+import { assert } from "../platform/GfxPlatformUtil.js";
+
+export enum GfxTopology {
+    Triangles, TriStrips, TriFans, Quads,
 };
 
-export function convertToTriangles(dstBuffer: Uint16Array, dstOffs: number, topology: GfxTopology, indexBuffer: Uint16Array): void {
-    assert(topology !== GfxTopology.TRIANGLES);
+export function convertToTriangles(dstBuffer: Uint16Array | Uint32Array, dstOffs: number, topology: GfxTopology, indexBuffer: Uint16Array | Uint32Array, baseVertex: number = 0): number {
     assert(dstOffs + getTriangleIndexCountForTopologyIndexCount(topology, indexBuffer.length) <= dstBuffer.length);
 
     let dst = dstOffs;
-    if (topology === GfxTopology.QUADS) {
+    if (topology === GfxTopology.Quads) {
         for (let i = 0; i < indexBuffer.length; i += 4) {
-            dstBuffer[dst++] = indexBuffer[i + 0];
-            dstBuffer[dst++] = indexBuffer[i + 1];
-            dstBuffer[dst++] = indexBuffer[i + 2];
-            dstBuffer[dst++] = indexBuffer[i + 2];
-            dstBuffer[dst++] = indexBuffer[i + 3];
-            dstBuffer[dst++] = indexBuffer[i + 0];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 0];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 1];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 2];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 0];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 2];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 3];
         }
-    } else if (topology === GfxTopology.TRISTRIP) {
+    } else if (topology === GfxTopology.TriStrips) {
+        for (let i = 2; i < indexBuffer.length; i++) {
+            dstBuffer[dst++] = baseVertex + indexBuffer[i - 2];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i - (~i & 1)];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i - (i & 1)];
+        }
+    } else if (topology === GfxTopology.TriFans) {
         for (let i = 0; i < indexBuffer.length - 2; i++) {
-            if (i % 2 === 0) {
-                dstBuffer[dst++] = indexBuffer[i + 0];
-                dstBuffer[dst++] = indexBuffer[i + 1];
-                dstBuffer[dst++] = indexBuffer[i + 2];
-            } else {
-                dstBuffer[dst++] = indexBuffer[i + 1];
-                dstBuffer[dst++] = indexBuffer[i + 0];
-                dstBuffer[dst++] = indexBuffer[i + 2];
-            }
+            dstBuffer[dst++] = baseVertex + indexBuffer[0];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 1];
+            dstBuffer[dst++] = baseVertex + indexBuffer[i + 2];
         }
-    } else if (topology === GfxTopology.TRIFAN) {
-        for (let i = 0; i < indexBuffer.length - 2; i++) {
-            dstBuffer[dst++] = indexBuffer[0];
-            dstBuffer[dst++] = indexBuffer[i + 1];
-            dstBuffer[dst++] = indexBuffer[i + 2];
-        }
-    } else if (topology === GfxTopology.QUADSTRIP) {
-        for (let i = 0; i < indexBuffer.length - 2; i += 2) {
-            dstBuffer[dst++] = indexBuffer[i + 0];
-            dstBuffer[dst++] = indexBuffer[i + 1];
-            dstBuffer[dst++] = indexBuffer[i + 2];
-            dstBuffer[dst++] = indexBuffer[i + 2];
-            dstBuffer[dst++] = indexBuffer[i + 1];
-            dstBuffer[dst++] = indexBuffer[i + 3];
-        }
+    } else if (topology === GfxTopology.Triangles) {
+        dstBuffer.set(indexBuffer, dstOffs);
     }
+    return dst - dstOffs;
+}
+
+export function convertToTrianglesRange(dstBuffer: Uint16Array | Uint32Array | number[], dstOffs: number, topology: GfxTopology, baseVertex: number, numVertices: number): number {
+    assert(dstOffs + getTriangleIndexCountForTopologyIndexCount(topology, numVertices) <= dstBuffer.length);
+
+    let dst = dstOffs;
+    if (topology === GfxTopology.Quads) {
+        for (let i = 0; i < numVertices; i += 4) {
+            dstBuffer[dst++] = baseVertex + i + 0;
+            dstBuffer[dst++] = baseVertex + i + 1;
+            dstBuffer[dst++] = baseVertex + i + 2;
+            dstBuffer[dst++] = baseVertex + i + 0;
+            dstBuffer[dst++] = baseVertex + i + 2;
+            dstBuffer[dst++] = baseVertex + i + 3;
+        }
+    } else if (topology === GfxTopology.TriStrips) {
+        for (let i = 2; i < numVertices; i++) {
+            dstBuffer[dst++] = baseVertex + i - 2;
+            dstBuffer[dst++] = baseVertex + i - (~i & 1);
+            dstBuffer[dst++] = baseVertex + i - (i & 1);
+        }
+    } else if (topology === GfxTopology.TriFans) {
+        for (let i = 2; i < numVertices; i++) {
+            dstBuffer[dst++] = baseVertex;
+            dstBuffer[dst++] = baseVertex + i - 1;
+            dstBuffer[dst++] = baseVertex + i;
+        }
+    } else if (topology === GfxTopology.Triangles) {
+        for (let i = 0; i < numVertices; i++)
+            dstBuffer[dst++] = baseVertex + i;
+    }
+    return dst - dstOffs;
 }
 
 export function convertToTriangleIndexBuffer(topology: GfxTopology, indexBuffer: Uint16Array): Uint16Array {
-    if (topology === GfxTopology.TRIANGLES)
+    if (topology === GfxTopology.Triangles)
         return indexBuffer;
-
     const newSize = getTriangleIndexCountForTopologyIndexCount(topology, indexBuffer.length);
     const newBuffer = new Uint16Array(newSize);
     convertToTriangles(newBuffer, 0, topology, indexBuffer);
-
     return newBuffer;
 }
 
-function range(start: number, length: number): Uint16Array {
-    const r = new Uint16Array(length);
-    for (let i = 0; i < length; i++)
-        r[i] = start + i;
-    return r;
-}
-
-export function convertTopologyRangeToTriangles(dstBuffer: Uint16Array, dstOffs: number, topology: GfxTopology, baseVertex: number, numVertices: number): void {
-    return convertToTriangles(dstBuffer, dstOffs, topology, range(baseVertex, numVertices));
-}
-
 export function makeTriangleIndexBuffer(topology: GfxTopology, baseVertex: number, numVertices: number): Uint16Array {
-    return convertToTriangleIndexBuffer(topology, range(baseVertex, numVertices));
+    const newSize = getTriangleIndexCountForTopologyIndexCount(topology, numVertices);
+    const newBuffer = new Uint16Array(newSize);
+    convertToTrianglesRange(newBuffer, 0, topology, baseVertex, numVertices);
+    return newBuffer;
 }
 
 export function getTriangleCountForTopologyIndexCount(topology: GfxTopology, indexCount: number): number {
     switch (topology) {
-    case GfxTopology.TRIANGLES:
+    case GfxTopology.Triangles:
         // One triangle per every three indexes.
         return indexCount / 3;
-    case GfxTopology.TRISTRIP:
-    case GfxTopology.TRIFAN:
+    case GfxTopology.TriStrips:
+    case GfxTopology.TriFans:
         // One triangle per index, minus the first two.
         return (indexCount - 2);
-    case GfxTopology.QUADS:
+    case GfxTopology.Quads:
         // Two triangles per four indices.
         return 2 * (indexCount / 4);
-    case GfxTopology.QUADSTRIP:
-        // Two triangles per two indexes, minus the first two.
-        return 2 * (indexCount - 2);
     }
 }
 

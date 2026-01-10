@@ -1,34 +1,43 @@
 {
     "compilerOptions": {
-        "target": "es6",
+        "target": "ES2022",
         "alwaysStrict": true,
         "downlevelIteration": true,
+        "esModuleInterop": true,
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true,
+        "noImplicitAny": true,
+        "noImplicitOverride": true,
         "noImplicitReturns": true,
         "noImplicitThis": true,
-        "noImplicitAny": true,
+        "strictBindCallApply": true,
         "strictFunctionTypes": true,
+        "strictNullChecks": true,
+        "useUnknownInCatchVariables": true,
+        "useDefineForClassFields": false,
+        "resolveJsonModule": true,
         "lib": [
-            "es2015",
-            "es2015.promise",
-            "es2016.array.include",
-            "dom"
+            "ES2022",
+            "ES2024.ArrayBuffer",
+            "DOM"
         ],
         "sourceMap": true,
-        "moduleResolution": "node",
-        "module": "commonjs",
+        "moduleResolution": "Bundler",
+        "module": "ESNext",
+        "isolatedModules": true,
         "types": [
             "gl-matrix",
-            "webassembly-js-api",
-            "webgl2",
-            "pako"
-        ],
+            "webxr"
+        ]
     },
     "include": [
-        "./src/"
+        "./src/",
+        "node_modules/@webgpu/types"
     ],
     "exclude": [
         "**/assembly/*.ts",
         "**/worker/*.ts",
-        "**/tools/*.ts"
+        "**/tools/*.ts",
+        "*.wasm"
     ]
 }

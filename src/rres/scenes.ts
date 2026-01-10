@@ -1,19 +1,20 @@
 
-import * as Yaz0 from '../compression/Yaz0';
-import * as BRRES from './brres';
-import * as U8 from './u8';
-import * as Viewer from '../viewer';
-import * as UI from '../ui';
+import * as Yaz0 from '../Common/Compression/Yaz0.js';
+import * as BRRES from './brres.js';
+import * as U8 from './u8.js';
+import * as Viewer from '../viewer.js';
+import * as UI from '../ui.js';
 
-import { U8Archive } from "./u8";
-import { createMarioKartWiiSceneFromU8Archive } from "./Scenes_MarioKartWii";
-import ArrayBufferSlice from "../ArrayBufferSlice";
-import { readString } from "../util";
-import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from './render';
-import { GXMaterialHacks } from '../gx/gx_material';
-import AnimationController from '../AnimationController';
-import { GfxDevice, GfxHostAccessPass } from '../gfx/platform/GfxPlatform';
-import { BasicGXRendererHelper } from '../gx/gx_render';
+import { U8Archive } from "./u8.js";
+import { createMarioKartWiiSceneFromU8Archive } from "../MarioKartWii/Scenes_MarioKartWii.js";
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { readString } from "../util.js";
+import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from './render.js';
+import { GXMaterialHacks } from '../gx/gx_material.js';
+import AnimationController from '../AnimationController.js';
+import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
+import { BasicGXRendererHelper, fillSceneParamsDataOnTemplate } from '../gx/gx_render.js';
+import { SceneContext } from '../SceneBase.js';
 
 const materialHacks: GXMaterialHacks = {
     lightingFudge: (p) => `(0.5 * (${p.ambSource} + 0.2) * ${p.matSource})`,
@@ -71,27 +72,25 @@ export class BasicRRESRenderer extends BasicGXRendererHelper {
         return panels;
     }
 
-    protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    protected prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
         this.animationController.setTimeInMilliseconds(viewerInput.time);
 
         for (let i = 0; i < this.scn0Animators.length; i++)
             this.scn0Animators[i].calcLightSetting(this.lightSettings[i]);
 
         const template = this.renderHelper.pushTemplateRenderInst();
-        this.renderHelper.fillSceneParams(viewerInput, template);
+        fillSceneParamsDataOnTemplate(template, viewerInput);
         for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
-        this.renderHelper.renderInstManager.popTemplateRenderInst();
-        this.renderHelper.prepareToRender(device, hostAccessPass);
+            this.modelInstances[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput);
+        this.renderHelper.renderInstManager.popTemplate();
+        this.renderHelper.prepareToRender();
     }
 
-    public destroy(device: GfxDevice): void {
+    public override destroy(device: GfxDevice): void {
         super.destroy(device);
         this.textureHolder.destroy(device);
         for (let i = 0; i < this.models.length; i++)
             this.models[i].destroy(device);
-        for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].destroy(device);
     }
 }
 
@@ -102,9 +101,14 @@ export function createBasicRRESRendererFromBRRES(device: GfxDevice, buffer: Arra
 
 export function createBasicRRESRendererFromU8Archive(device: GfxDevice, arc: U8Archive) {
     function findRRES(rres: BRRES.RRES[], dir: U8.U8Dir) {
-        for (let i = 0; i < dir.files.length; i++)
+        for (let i = 0; i < dir.files.length; i++) {
             if (dir.files[i].name.endsWith('.brres') || dir.files[i].name.endsWith('.brtex'))
                 rres.push(BRRES.parse(dir.files[i].buffer));
+            if (dir.files[i].name.endsWith('.arc')) {
+                const subarc = U8.parse(dir.files[i].buffer);
+                findRRES(rres, subarc.root);
+            }
+        }
         for (let i = 0; i < dir.subdirs.length; i++)
             findRRES(rres, dir.subdirs[i]);
     }
@@ -128,12 +132,13 @@ export function createBasicRRESRendererFromU8Buffer(device: GfxDevice, buffer: A
     });
 }
 
-export function createSceneFromU8Buffer(device: GfxDevice, buffer: ArrayBufferSlice) {
+export async function createSceneFromU8Buffer(context: SceneContext, buffer: ArrayBufferSlice) {
+    const device = context.device;
     const arc = U8.parse(buffer);
 
     // If we have a course.kmp, that means we're a Mario Kart Wii archive.
     if (arc.findFile('./course.kmp') !== null)
-        return createMarioKartWiiSceneFromU8Archive(device, arc);
+        return createMarioKartWiiSceneFromU8Archive(context, arc);
 
     // Otherwise, assume that we have a basic scene.
     return createBasicRRESRendererFromU8Archive(device, arc);

@@ -1,58 +1,58 @@
 
-import { GfxMegaStateDescriptor, GfxFrontFaceMode, GfxCullMode, GfxStencilOp, GfxCompareMode, GfxBlendFactor, GfxBlendMode, GfxAttachmentState } from "../platform/GfxPlatform";
-import { colorCopy, colorNewCopy } from "../../Color";
-import { reverseDepthForCompareMode } from "./ReversedDepthHelpers";
+import { GfxMegaStateDescriptor, GfxFrontFaceMode, GfxCullMode, GfxStencilOp, GfxCompareMode, GfxBlendFactor, GfxBlendMode, GfxAttachmentState, GfxChannelWriteMask, GfxChannelBlendState } from "../platform/GfxPlatform.js";
+import { reverseDepthForCompareMode } from "./ReversedDepthHelpers.js";
+import { fallbackUndefined } from "../platform/GfxPlatformUtil.js";
 
-function resolveField<T>(v: T | undefined, parentV: T): T {
-    return v !== undefined ? v : parentV;
+function copyChannelBlendState(dst: GfxChannelBlendState, src: GfxChannelBlendState): void {
+    dst.blendDstFactor = src.blendDstFactor;
+    dst.blendSrcFactor = src.blendSrcFactor;
+    dst.blendMode = src.blendMode;
 }
 
-function copyAttachmentState(dst: GfxAttachmentState | undefined, src: GfxAttachmentState): GfxAttachmentState {
+export function copyAttachmentState(dst: GfxAttachmentState | undefined, src: GfxAttachmentState): GfxAttachmentState {
     if (dst === undefined) {
-        return {
-            rgbBlendState: Object.assign({}, src.rgbBlendState),
-            alphaBlendState: Object.assign({}, src.alphaBlendState),
-            blendConstant: colorNewCopy(src.blendConstant),
-            colorWriteMask: src.colorWriteMask,
+        dst = {
+            rgbBlendState: {} as GfxChannelBlendState,
+            alphaBlendState: {} as GfxChannelBlendState,
+            channelWriteMask: 0,
         };
-    } else {
-        Object.assign(dst.rgbBlendState, src.rgbBlendState);
-        Object.assign(dst.alphaBlendState, src.alphaBlendState);
-        colorCopy(dst.blendConstant, src.blendConstant);
-        dst.colorWriteMask = src.colorWriteMask;
-        return dst;
     }
+
+    copyChannelBlendState(dst.rgbBlendState, src.rgbBlendState);
+    copyChannelBlendState(dst.alphaBlendState, src.alphaBlendState);
+    dst.channelWriteMask = src.channelWriteMask;
+    return dst;
 }
 
 function copyAttachmentsState(dst: GfxAttachmentState[], src: GfxAttachmentState[]): void {
+    if (dst.length !== src.length)
+        dst.length = src.length;
     for (let i = 0; i < src.length; i++)
         dst[i] = copyAttachmentState(dst[i], src[i]);
 }
 
-export function setMegaStateFlags(dst: GfxMegaStateDescriptor, other: Partial<GfxMegaStateDescriptor>): void {
+export function setMegaStateFlags(dst: GfxMegaStateDescriptor, src: Partial<GfxMegaStateDescriptor>): void {
     // attachmentsState replaces wholesale; it does not merge.
-    if (other.attachmentsState !== undefined) {
-        if (dst.attachmentsState === undefined)
-            dst.attachmentsState = [];
-        copyAttachmentsState(dst.attachmentsState, other.attachmentsState);
-    }
+    if (src.attachmentsState !== undefined)
+        copyAttachmentsState(dst.attachmentsState, src.attachmentsState);
 
-    dst.colorWrite = resolveField(other.colorWrite, dst.colorWrite);
-    dst.blendMode = resolveField(other.blendMode, dst.blendMode);
-    dst.blendSrcFactor = resolveField(other.blendSrcFactor, dst.blendSrcFactor);
-    dst.blendDstFactor = resolveField(other.blendDstFactor, dst.blendDstFactor);
-    dst.depthCompare = resolveField(other.depthCompare, dst.depthCompare);
-    dst.depthWrite = resolveField(other.depthWrite, dst.depthWrite);
-    dst.stencilCompare = resolveField(other.stencilCompare, dst.stencilCompare);
-    dst.stencilWrite = resolveField(other.stencilWrite, dst.stencilWrite);
-    dst.stencilPassOp = resolveField(other.stencilPassOp, dst.stencilPassOp);
-    dst.cullMode = resolveField(other.cullMode, dst.cullMode);
-    dst.frontFace = resolveField(other.frontFace, dst.frontFace);
-    dst.polygonOffset = resolveField(other.polygonOffset, dst.polygonOffset);
+    dst.depthCompare = fallbackUndefined(src.depthCompare, dst.depthCompare);
+    dst.depthWrite = fallbackUndefined(src.depthWrite, dst.depthWrite);
+    dst.stencilCompare = fallbackUndefined(src.stencilCompare, dst.stencilCompare);
+    dst.stencilWrite = fallbackUndefined(src.stencilWrite, dst.stencilWrite);
+    dst.stencilPassOp = fallbackUndefined(src.stencilPassOp, dst.stencilPassOp);
+    dst.cullMode = fallbackUndefined(src.cullMode, dst.cullMode);
+    dst.frontFace = fallbackUndefined(src.frontFace, dst.frontFace);
+    dst.polygonOffset = fallbackUndefined(src.polygonOffset, dst.polygonOffset);
+    dst.wireframe = fallbackUndefined(src.wireframe, dst.wireframe);
 }
 
-export function copyMegaState(src: GfxMegaStateDescriptor) {
-    return Object.assign({}, src);
+export function copyMegaState(src: GfxMegaStateDescriptor): GfxMegaStateDescriptor {
+    const dst = Object.assign({}, src);
+    // Copy fields that need copying.
+    dst.attachmentsState = [];
+    copyAttachmentsState(dst.attachmentsState, src.attachmentsState);
+    return dst;
 }
 
 export function makeMegaState(other: Partial<GfxMegaStateDescriptor> | null = null, src: GfxMegaStateDescriptor = defaultMegaState) {
@@ -62,19 +62,64 @@ export function makeMegaState(other: Partial<GfxMegaStateDescriptor> | null = nu
     return dst;
 }
 
-export const defaultMegaState: GfxMegaStateDescriptor = {
-    colorWrite: true,
-    blendMode: GfxBlendMode.NONE,
-    blendSrcFactor: GfxBlendFactor.ONE,
-    blendDstFactor: GfxBlendFactor.ZERO,
-    depthWrite: true,
-    depthCompare: reverseDepthForCompareMode(GfxCompareMode.LEQUAL),
-    stencilCompare: GfxCompareMode.NEVER,
-    stencilWrite: false,
-    stencilPassOp: GfxStencilOp.KEEP,
-    cullMode: GfxCullMode.NONE,
-    frontFace: GfxFrontFaceMode.CCW,
-    polygonOffset: false,
+export interface AttachmentStateSimple {
+    channelWriteMask: GfxChannelWriteMask;
+    blendMode: GfxBlendMode;
+    blendSrcFactor: GfxBlendFactor;
+    blendDstFactor: GfxBlendFactor;
+}
+
+export function copyAttachmentStateFromSimple(dst: GfxAttachmentState, src: Partial<AttachmentStateSimple>): void {
+    if (src.channelWriteMask !== undefined)
+        dst.channelWriteMask = src.channelWriteMask;
+
+    if (src.blendMode !== undefined) {
+        dst.rgbBlendState.blendMode = src.blendMode;
+        dst.alphaBlendState.blendMode = src.blendMode;
+    }
+
+    if (src.blendSrcFactor !== undefined) {
+        dst.rgbBlendState.blendSrcFactor = src.blendSrcFactor;
+        dst.alphaBlendState.blendSrcFactor = src.blendSrcFactor;
+    }
+
+    if (src.blendDstFactor !== undefined) {
+        dst.rgbBlendState.blendDstFactor = src.blendDstFactor;
+        dst.alphaBlendState.blendDstFactor = src.blendDstFactor;
+    }
+}
+
+export function setAttachmentStateSimple(dst: Partial<GfxMegaStateDescriptor>, simple: Partial<AttachmentStateSimple>): Partial<GfxMegaStateDescriptor> {
+    if (dst.attachmentsState === undefined) {
+        dst.attachmentsState = [];
+        copyAttachmentsState(dst.attachmentsState, defaultMegaState.attachmentsState);
+    }
+
+    copyAttachmentStateFromSimple(dst.attachmentsState![0], simple);
+    return dst;
+}
+
+const defaultBlendState: GfxChannelBlendState = {
+    blendMode: GfxBlendMode.Add,
+    blendSrcFactor: GfxBlendFactor.One,
+    blendDstFactor: GfxBlendFactor.Zero,
 };
 
-export const fullscreenMegaState = makeMegaState({ depthCompare: GfxCompareMode.ALWAYS, depthWrite: false }, defaultMegaState);
+export const defaultMegaState: GfxMegaStateDescriptor = {
+    attachmentsState: [{
+        channelWriteMask: GfxChannelWriteMask.RGB,
+        rgbBlendState: defaultBlendState,
+        alphaBlendState: defaultBlendState,
+    }],
+    depthCompare: reverseDepthForCompareMode(GfxCompareMode.LessEqual),
+    depthWrite: true,
+    stencilCompare: GfxCompareMode.Always,
+    stencilWrite: false,
+    stencilPassOp: GfxStencilOp.Keep,
+    cullMode: GfxCullMode.None,
+    frontFace: GfxFrontFaceMode.CCW,
+    polygonOffset: false,
+    wireframe: false,
+};
+
+export const fullscreenMegaState = makeMegaState({ depthCompare: GfxCompareMode.Always, depthWrite: false }, defaultMegaState);

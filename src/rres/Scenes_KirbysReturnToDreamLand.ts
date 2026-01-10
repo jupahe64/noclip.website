@@ -1,33 +1,41 @@
 
-// Kirby's Return to Dreamland
+// Kirby's Return to Dream Land
 
-import * as Viewer from '../viewer';
-import * as BRRES from './brres';
-import * as CX from '../compression/CX';
+import * as Viewer from '../viewer.js';
+import * as BRRES from './brres.js';
+import * as CX from '../Common/Compression/CX.js';
 
-import ArrayBufferSlice from '../ArrayBufferSlice';
-import { GfxDevice } from '../gfx/platform/GfxPlatform';
-import { BasicRRESRenderer } from './scenes';
-import { SceneContext } from '../SceneBase';
+import ArrayBufferSlice from '../ArrayBufferSlice.js';
+import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
+import { BasicRRESRenderer } from './scenes.js';
+import { SceneContext } from '../SceneBase.js';
+import { CameraController } from '../Camera.js';
 
+class RTDLRenderer extends BasicRRESRenderer {
+    public adjustCameraController(c: CameraController) {
+        c.setSceneMoveSpeedMult(1/60);
+    }
+}
+
+const pathBase = `KirbysReturnToDreamLand`;
 class RTDLSceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {}
 
     public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         const dataFetcher = context.dataFetcher;
 
-        return dataFetcher.fetchData(`rtdl/${this.id}.brres`).then((buffer: ArrayBufferSlice) => {
+        return dataFetcher.fetchData(`${pathBase}/${this.id}.brres`).then((buffer: ArrayBufferSlice) => {
             return CX.decompress(buffer);
         }).then((buffer: ArrayBufferSlice): Viewer.SceneGfx => {
             const courseRRES = BRRES.parse(buffer);
-            return new BasicRRESRenderer(device, [courseRRES]);
+            return new RTDLRenderer(device, [courseRRES]);
         });
     }
 }
 
 // Stages added/named/organized by Matthew @TanukiMatthew <3
 const id = 'rtdl';
-const name = "Kirby's Return to Dreamland";
+const name = "Kirby's Return to Dream Land";
 const sceneDescs = [
     "World Maps",
     new RTDLSceneDesc('popstarBg', "Planet Popstar"),

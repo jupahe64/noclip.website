@@ -47,17 +47,14 @@ Temporary Items
 .apdisk
 
 node_modules
-yarn-error.log
 
-assemblyscript/
-parcel/
+rust/target/
+.pnpm-debug.log
 .cache/
 
-dist/*
-!dist/.htaccess
-post*.html
+data/*
+!data/.gitkeep
+dist/
 
-deploy_rsa
-deploy_rsa.pub
-
-*.psd
+# wasm-pack not working correctly
+pkg/index.js

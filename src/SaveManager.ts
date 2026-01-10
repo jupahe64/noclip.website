@@ -1,11 +1,13 @@
 
-//@ts-ignore
-import * as defaultSaveStateData from './DefaultSaveStates.json';
+import defaultSaveStateData from './DefaultSaveStates.json';
 
 export type SettingCallback = (saveManager: SaveManager, key: string) => void;
-export type SaveStateCallback = (saveManager: SaveManager) => void;
 
-export const enum SaveStateLocation {
+interface SaveStateMap {
+    [k: string]: string;
+}
+
+export enum SaveStateLocation {
     LocalStorage,
     SessionStorage,
     Defaults,
@@ -19,7 +21,6 @@ interface SettingListener {
 
 export class SaveManager {
     private settingListeners: SettingListener[] = [];
-    private saveStateListeners: SaveStateCallback[] = [];
 
     constructor() {
         this.cleanOldKeys();
@@ -48,13 +49,17 @@ export class SaveManager {
             return defaultValue;
     }
 
-    public saveSetting<T>(key: string, value: T, force: boolean = false): void {
-        if (force || (this.loadSetting<T | null>(key, null) === value))
-            return;
-        window.localStorage.setItem(this.getSettingKey(key), JSON.stringify(value));
+    public callSettingsListener(key: string): void {
         for (let i = 0; i < this.settingListeners.length; i++)
             if (this.settingListeners[i].key === key)
                 this.settingListeners[i].callback(this, key);
+    }
+
+    public saveSetting<T>(key: string, value: T, force: boolean = false): void {
+        if (!force && this.loadSetting<T | null>(key, null) === value)
+            return;
+        window.localStorage.setItem(this.getSettingKey(key), JSON.stringify(value));
+        this.callSettingsListener(key);
     }
 
     public addSettingListener(key: string, callback: SettingCallback, triggerNow: boolean = true): void {
@@ -75,15 +80,6 @@ export class SaveManager {
         window.sessionStorage.setItem('CurrentSceneDescId', id);
     }
 
-    public addSaveStateListener(callback: SaveStateCallback): void {
-        this.saveStateListeners.push(callback);
-    }
-
-    private callSaveStateListeners(): void {
-        for (let i = 0; i < this.saveStateListeners.length; i++)
-            this.saveStateListeners[i](this);
-    }
- 
     public saveTemporaryState(key: string, serializedState: string): void {
         // Clean up old stuff.
         window.localStorage.removeItem(key);
@@ -92,12 +88,10 @@ export class SaveManager {
 
     public saveState(key: string, serializedState: string): void {
         window.localStorage.setItem(key, serializedState);
-        this.callSaveStateListeners();
     }
 
     public deleteState(key: string): void {
         window.localStorage.removeItem(key);
-        this.callSaveStateListeners();
     }
 
     public hasStateInLocation(key: string, location: SaveStateLocation): boolean {
@@ -120,8 +114,8 @@ export class SaveManager {
         if (location === SaveStateLocation.SessionStorage)
             return window.sessionStorage.getItem(key);
 
-        if (location === SaveStateLocation.Defaults)
-            return defaultSaveStateData[key];
+        if (location === SaveStateLocation.Defaults && key in defaultSaveStateData)
+            return (defaultSaveStateData as SaveStateMap)[key] || null;
 
         return null;
     }
@@ -139,7 +133,7 @@ export class SaveManager {
             return state;
 
         // Look up in default save state data.
-        state = defaultSaveStateData[key];
+        state = (defaultSaveStateData as SaveStateMap)[key];
         if (state)
             return state;
 

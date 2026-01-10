@@ -1,11 +1,11 @@
 
-import ArrayBufferSlice from "../ArrayBufferSlice";
-import { ImageFormat, ChannelFormat, TypeFormat, getChannelFormat, getTypeFormat } from "./nngfx_enum";
-import { BRTI } from "./bntx";
-import { GfxFormat } from "../gfx/platform/GfxPlatform";
-import { decompressBC, DecodedSurfaceSW, DecodedSurfaceBC } from "../fres/bc_texture";
-import { assert } from "../util";
-import { clamp } from "../MathHelpers";
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { ImageFormat, ChannelFormat, TypeFormat, getChannelFormat, getTypeFormat } from "./nngfx_enum.js";
+import { BRTI } from "./bntx.js";
+import { GfxFormat } from "../gfx/platform/GfxPlatform.js";
+import { decompressBC, DecodedSurfaceSW, DecodedSurfaceBC } from "../Common/bc_texture.js";
+import { assert } from "../util.js";
+import { rust } from "../rustlib.js";
 
 export function getFormatBlockWidth(channelFormat: ChannelFormat): number {
     switch (channelFormat) {
@@ -75,6 +75,21 @@ export function getFormatBlockHeight(channelFormat: ChannelFormat): number {
     }
 }
 
+export function isChannelFormatSupported(channelFormat: ChannelFormat): boolean {
+    switch (channelFormat) {
+    case ChannelFormat.Bc1:
+    case ChannelFormat.Bc4:
+    case ChannelFormat.Bc2:
+    case ChannelFormat.Bc3:
+    case ChannelFormat.Bc5:
+    case ChannelFormat.R8_G8_B8_A8:
+    case ChannelFormat.B8_G8_R8_A8:
+        return true;
+    default:
+        return false;
+    }
+}
+
 export function getFormatBytesPerPixel(channelFormat: ChannelFormat): number {
     switch (channelFormat) {
     case ChannelFormat.Bc1:
@@ -92,70 +107,27 @@ export function getFormatBytesPerPixel(channelFormat: ChannelFormat): number {
     }
 }
 
-export function getBlockHeightLog2(heightInBlocks: number): number {
-    return clamp(Math.ceil(Math.log2(heightInBlocks / 8)), 0, 4);
-}
-
 export interface SwizzledSurface {
     width: number;
     height: number;
     channelFormat: ChannelFormat;
     buffer: ArrayBufferSlice;
+    blockHeightLog2: number; // The block height of mip0.
 }
 
-function ctz(n: number): number {
-    let i = 0;
-    while (!(n & 1)) ++i, n >>= 1;
-    return i;
+export async function deswizzle(swizzledSurface: SwizzledSurface): Promise<Uint8Array<ArrayBuffer>> {
+    const { buffer, channelFormat, width, height, blockHeightLog2 } = swizzledSurface;
+    const compressionType =
+        channelFormat === ChannelFormat.Bc1 ? rust.CompressionType.Bc1 :
+        channelFormat === ChannelFormat.Bc2 ? rust.CompressionType.Bc2 :
+        channelFormat === ChannelFormat.Bc3 ? rust.CompressionType.Bc3 :
+        channelFormat === ChannelFormat.Bc4 ? rust.CompressionType.Bc4 :
+        channelFormat === ChannelFormat.Bc5 ? rust.CompressionType.Bc5 :
+        undefined!;
+    return rust.tegra_deswizzle(buffer.createTypedArray(Uint8Array), compressionType, width, height, blockHeightLog2) as Uint8Array<ArrayBuffer>;
 }
 
-// https://github.com/gdkchan/BnTxx/blob/master/BnTxx/BlockLinearSwizzle.cs
-// TODO(jstpierre): Integrate the proper algorithm from Yuzu
-export function deswizzle(swizzledSurface: SwizzledSurface): Uint8Array {
-    const formatBlockWidth = getFormatBlockWidth(swizzledSurface.channelFormat);
-    const formatBlockHeight = getFormatBlockHeight(swizzledSurface.channelFormat);
-
-    const widthInBlocks = ((swizzledSurface.width + formatBlockWidth - 1) / formatBlockWidth) | 0;
-    const heightInBlocks = ((swizzledSurface.height + formatBlockHeight - 1) / formatBlockHeight) | 0;
-
-    const blockHeight = 1 << getBlockHeightLog2(heightInBlocks);
-    const bpp = getFormatBytesPerPixel(swizzledSurface.channelFormat);
-    const bhMask = (blockHeight * 8) - 1;
-    const bhShift = ctz(blockHeight * 8);
-    const xShift = ctz(blockHeight * 512);
-    const bppShift = ctz(bpp);
-    const widthInGobs = Math.ceil(widthInBlocks * bpp / 64);
-    const gobStride = 512 * blockHeight * widthInGobs;
-
-    function memcpy(dst: Uint8Array, dstOffs: number, src: ArrayBufferSlice, srcOffs: number, length: number) {
-        dst.set(src.createTypedArray(Uint8Array, srcOffs, length), dstOffs);
-    }
-
-    const src = swizzledSurface.buffer;
-    const dst = new Uint8Array(widthInBlocks * heightInBlocks * bpp);
-    for (let y = 0; y < heightInBlocks; y++) {
-        for (let x = 0; x < widthInBlocks; x++) {
-            const nx = x << bppShift, ny = y;
-            let p = 0;
-
-            p += ((ny >>> bhShift)) * gobStride;
-            p += ((nx >>> 6)) << xShift;
-            p += ((ny & bhMask) >>> 3) << 9;
-            p += ((nx & 0x3F) >>> 5) << 8;
-            p += ((ny & 0x07) >>> 1) << 6;
-            p += ((nx & 0x1F) >>> 4) << 5;
-            p += ((ny & 0x01) >>> 0) << 4;
-            p += ((nx & 0x0F) >>> 0) << 0;
-
-            const srcOffs = p;
-            const dstOffs = ((y * widthInBlocks) + x) * bpp;
-            memcpy(dst, dstOffs, src, srcOffs, bpp);
-        }
-    }
-    return dst;
-}
-
-export function decompress(textureEntry: BRTI, pixels: Uint8Array): DecodedSurfaceSW {
+export function decompress(textureEntry: BRTI, pixels: Uint8Array<ArrayBuffer>): DecodedSurfaceSW {
     const channelFormat = getChannelFormat(textureEntry.imageFormat);
     const typeFormat = getTypeFormat(textureEntry.imageFormat);
 
@@ -223,7 +195,7 @@ export function translateImageFormat(imageFormat: ImageFormat): GfxFormat {
 
     switch (typeFormat) {
     case TypeFormat.Unorm:
-        return GfxFormat.U8_RGBA;
+        return GfxFormat.U8_RGBA_NORM;
     case TypeFormat.UnormSrgb:
         return GfxFormat.U8_RGBA_SRGB;
     case TypeFormat.Snorm:

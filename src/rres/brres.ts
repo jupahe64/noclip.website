@@ -2,26 +2,26 @@
 // Parses NintendoWare BRRES (Binary Revolution RESource) files.
 // http://wiki.tockdom.com/wiki/BRRES
 
-import * as GX from '../gx/gx_enum';
+import * as GX from '../gx/gx_enum.js';
 
-import ArrayBufferSlice from "../ArrayBufferSlice";
-import { assert, readString, assertExists, hexdump, nArray } from "../util";
-import * as GX_Material from '../gx/gx_material';
-import { GX_Array, GX_VtxAttrFmt, GX_VtxDesc, LoadedVertexData, compileVtxLoader, LoadedVertexLayout, getAttributeComponentByteSizeRaw, getAttributeFormatCompFlagsRaw } from '../gx/gx_displaylist';
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { assert, readString, assertExists, nArray } from "../util.js";
+import * as GX_Material from '../gx/gx_material.js';
+import { DisplayListRegisters, displayListRegistersRun } from '../gx/gx_displaylist.js';
+import { GX_Array, GX_VtxAttrFmt, GX_VtxDesc, LoadedVertexData, compileVtxLoader, LoadedVertexLayout, getAttributeComponentByteSizeRaw, getAttributeFormatCompFlagsRaw } from '../gx/gx_displaylist.js';
 import { mat4, vec3 } from 'gl-matrix';
-import { Endianness } from '../endian';
-import { AABB } from '../Geometry';
-import { TextureMapping } from '../TextureHolder';
-import AnimationController from '../AnimationController';
-import { cv, Graph } from '../DebugJunk';
-import { GXTextureHolder } from '../gx/gx_render';
-import { getFormatCompFlagsComponentCount } from '../gfx/platform/GfxPlatformFormat';
-import { getPointHermite } from '../Spline';
-import { colorToRGBA8, colorFromRGBA8, colorNewCopy, White, Color, colorMult } from '../Color';
-import { computeModelMatrixSRT, MathConstants, lerp } from '../MathHelpers';
-import BitMap from '../BitMap';
-import { autoOptimizeMaterial } from '../gx/gx_render';
-import { Camera } from '../Camera';
+import { Endianness } from '../endian.js';
+import { AABB } from '../Geometry.js';
+import AnimationController from '../AnimationController.js';
+import { getFormatCompFlagsComponentCount } from '../gfx/platform/GfxPlatformFormat.js';
+import { getPointHermite } from '../Spline.js';
+import { colorToRGBA8, colorFromRGBA8, colorNewCopy, White, Color, colorNewFromRGBA, colorCopy } from '../Color.js';
+import { computeModelMatrixSRT, MathConstants, lerp, Vec3UnitY } from '../MathHelpers.js';
+import BitMap from '../BitMap.js';
+import { GXTextureMapping } from '../gx/gx_render.js';
+import { Camera } from '../Camera.js';
+import { MDL0ModelInstance } from './render.js';
+import { GXMaterialBuilder } from '../gx/GXMaterialBuilder.js';
 
 //#region Utility
 function calcTexMtx_Basic(dst: mat4, scaleS: number, scaleT: number, rotation: number, translationS: number, translationT: number): void {
@@ -48,11 +48,12 @@ function calcTexMtx_Maya(dst: mat4, scaleS: number, scaleT: number, rotation: nu
     mat4.identity(dst);
 
     dst[0]  = scaleS *  cosR;
-    dst[1]  = scaleT * -sinR;
     dst[4]  = scaleS *  sinR;
-    dst[5]  = scaleT *  cosR;
     dst[12] = scaleS * ((-0.5 * cosR) - (0.5 * sinR - 0.5) - translationS);
-    dst[13] = scaleT * ((-0.5 * cosR) + (0.5 * sinR - 0.5) + translationT) + 1;
+
+    dst[1]  = scaleT * -sinR;
+    dst[5]  = scaleT *  cosR;
+    dst[13] = scaleT * ((-0.5 * cosR) + (0.5 * sinR - 0.5) + translationT) + 1.0;
 }
 
 function calcTexMtx_XSI(dst: mat4, scaleS: number, scaleT: number, rotation: number, translationS: number, translationT: number): void {
@@ -63,11 +64,12 @@ function calcTexMtx_XSI(dst: mat4, scaleS: number, scaleT: number, rotation: num
     mat4.identity(dst);
 
     dst[0]  = scaleS *  cosR;
-    dst[1]  = scaleT *  sinR;
     dst[4]  = scaleS * -sinR;
-    dst[5]  = scaleT *  cosR;
     dst[12] = (scaleS *  sinR) - (scaleS * cosR * translationS) - (scaleS * sinR * translationT);
-    dst[12] = (scaleT * -cosR) - (scaleS * sinR * translationS) + (scaleS * cosR * translationT) + 1;
+
+    dst[1]  = scaleT *  sinR;
+    dst[5]  = scaleT *  cosR;
+    dst[13] = (scaleT * -cosR) - (scaleT * sinR * translationS) + (scaleT * cosR * translationT) + 1.0;
 }
 
 function calcTexMtx_Max(dst: mat4, scaleS: number, scaleT: number, rotation: number, translationS: number, translationT: number): void {
@@ -78,29 +80,30 @@ function calcTexMtx_Max(dst: mat4, scaleS: number, scaleT: number, rotation: num
     mat4.identity(dst);
 
     dst[0]  = scaleS *  cosR;
-    dst[1]  = scaleT * -sinR;
     dst[4]  = scaleS *  sinR;
+    dst[12] = scaleS * ((-cosR * (translationS + 0.5)) + (sinR * (translationT - 0.5))) + 0.5;
+
+    dst[1]  = scaleT * -sinR;
     dst[5]  = scaleT *  cosR;
-    dst[12] = (scaleS * -cosR * (translationS + 0.5)) + (scaleS * sinR * (translationT - 0.5)) + 0.5;
-    dst[13] = (scaleT *  sinR * (translationS + 0.5)) + (scaleT * cosR * (translationT - 0.5)) + 0.5;
+    dst[13] = scaleT * (( sinR * (translationS + 0.5)) + (cosR * (translationT - 0.5))) + 0.5;
 }
 
-const enum TexMatrixMode {
-    BASIC = -1,
-    MAYA = 0,
+enum TexMatrixMode {
+    Basic = -1,
+    Maya = 0,
     XSI = 1,
-    MAX = 2,
+    Max = 2,
 };
 
 function calcTexMtx(dst: mat4, texMtxMode: TexMatrixMode, scaleS: number, scaleT: number, rotation: number, translationS: number, translationT: number): void {
     switch (texMtxMode) {
-    case TexMatrixMode.BASIC:
+    case TexMatrixMode.Basic:
         return calcTexMtx_Basic(dst, scaleS, scaleT, rotation, translationS, translationT);
-    case TexMatrixMode.MAYA:
+    case TexMatrixMode.Maya:
         return calcTexMtx_Maya(dst, scaleS, scaleT, rotation, translationS, translationT);
     case TexMatrixMode.XSI:
         return calcTexMtx_XSI(dst, scaleS, scaleT, rotation, translationS, translationT);
-    case TexMatrixMode.MAX:
+    case TexMatrixMode.Max:
         return calcTexMtx_Max(dst, scaleS, scaleT, rotation, translationS, translationT);
     default:
         throw "whoops";
@@ -135,6 +138,71 @@ function parseResDic(buffer: ArrayBufferSlice, tableOffs: number): ResDicEntry[]
     }
 
     return entries;
+}
+
+export enum ResUserDataItemValueType {
+    S32, F32, STRING,
+}
+
+interface ResUserDataItemBase {
+    userDataType: ResUserDataItemValueType;
+    name: string;
+    id: number;
+}
+
+interface ResUserDataItemNumber extends ResUserDataItemBase {
+    value: number[];
+}
+
+interface ResUserDataItemString extends ResUserDataItemBase {
+    value: string[];
+}
+
+export type ResUserDataItem = ResUserDataItemNumber | ResUserDataItemString;
+
+interface ResUserData {
+    entries: ResUserDataItem[];
+}
+
+function parseUserData(buffer: ArrayBufferSlice, offs: number): ResUserData | null {
+    if (offs === 0)
+        return null;
+
+    const view = buffer.createDataView();
+    const size = view.getUint32(offs + 0x00);
+    const resDic = parseResDic(buffer, offs + 0x04);
+    const entries: ResUserDataItem[] = [];
+
+    for (let i = 0; i < resDic.length; i++) {
+        const itemOffs = resDic[i].offs;
+        const size = view.getUint32(itemOffs + 0x00);
+        const toData = view.getUint32(itemOffs + 0x04);
+        const arraySize = view.getUint32(itemOffs + 0x08);
+        const userDataType = view.getUint32(itemOffs + 0x0C);
+        const nameOffs = view.getUint32(itemOffs + 0x10);
+        const name = readString(buffer, itemOffs + nameOffs);
+        assert(name === resDic[i].name);
+        const id = view.getUint32(0x14);
+
+        if (userDataType === ResUserDataItemValueType.S32) {
+            const value: number[] = [];
+            for (let i = 0; i < arraySize; i++)
+                value.push(view.getInt32(itemOffs + toData + 0x04 * i));
+            entries.push({ userDataType, name, id, value });
+        } else if (userDataType === ResUserDataItemValueType.F32) {
+            const value: number[] = [];
+            for (let i = 0; i < arraySize; i++)
+                value.push(view.getFloat32(itemOffs + toData + 0x04 * i));
+            entries.push({ userDataType, name, id, value });
+        } else if (userDataType === ResUserDataItemValueType.STRING) {
+            const value: string[] = [];
+            for (let i = 0; i < arraySize; i++)
+                value.push(readString(buffer, itemOffs + toData + 0x04 * i));
+            entries.push({ userDataType, name, id, value });
+        }
+    }
+
+    return { entries };
 }
 //#endregion
 //#region PLT0
@@ -194,9 +262,10 @@ function parseTEX0(buffer: ArrayBufferSlice): TEX0 {
     const width = view.getUint16(0x1C);
     const height = view.getUint16(0x1E);
     const format: GX.TexFormat = view.getUint32(0x20);
-    const mipCount = view.getUint32(0x24);
-    const minLOD = view.getFloat32(0x28) * 1/8;
-    const maxLOD = view.getFloat32(0x2C) * 1/8;
+    const mipCountRaw = view.getUint32(0x24);
+    const minLOD = view.getFloat32(0x28);
+    const maxLOD = view.getFloat32(0x2C);
+    const mipCount = Math.ceil(Math.min(mipCountRaw, maxLOD + 1));
 
     const data = buffer.subarray(dataOffs);
 
@@ -207,124 +276,8 @@ function parseTEX0(buffer: ArrayBufferSlice): TEX0 {
     return { name, width, height, format, mipCount, minLOD, maxLOD, data, paletteFormat, paletteData };
 }
 //#endregion
+
 //#region MDL0
-export class DisplayListRegisters {
-    public bp: Uint32Array = new Uint32Array(0x100);
-    public cp: Uint32Array = new Uint32Array(0x100);
-
-    // Can have up to 16 values per register.
-    private xf: Uint32Array = new Uint32Array(0x1000);
-
-    // TEV colors are weird and are two things under the hood
-    // with the same register address.
-    public kc: Uint32Array = new Uint32Array(4 * 2 * 2);
-
-    constructor() {
-        // Initialize defaults.
-        this.bp[GX.BPRegister.SS_MASK] = 0x00FFFFFF;
-    }
-
-    public bps(regBag: number): void {
-        // First byte has register address, other 3 have value.
-        const regAddr  = regBag >>> 24;
-
-        const regWMask = this.bp[GX.BPRegister.SS_MASK];
-        // Retrieve existing value, overwrite w/ mask.
-        const regValue = (this.bp[regAddr] & ~regWMask) | (regBag & regWMask);
-        // The mask resets after use.
-        this.bp[GX.BPRegister.SS_MASK] = 0x00FFFFFF;
-        // Set new value.
-        this.bp[regAddr] = regValue;
-
-        // Copy TEV colors internally.
-        if (regAddr >= GX.BPRegister.TEV_REGISTERL_0_ID && regAddr <= GX.BPRegister.TEV_REGISTERL_0_ID + 4 * 2) {
-            const kci = regAddr - GX.BPRegister.TEV_REGISTERL_0_ID;
-            const bank = (regValue >>> 23) & 0x01;
-            this.kc[bank * 4 * 2 + kci] = regValue;
-        }
-    }
-    public xfs(idx: GX.XFRegister, sub: number, v: number): void {
-        assert(idx >= 0x1000);
-        idx -= 0x1000;
-        this.xf[idx * 0x10 + sub] = v;
-    }
-
-    public xfg(idx: GX.XFRegister, sub: number = 0): number {
-        assert(idx >= 0x1000);
-        idx -= 0x1000;
-        return this.xf[idx * 0x10 + sub];
-    }
-}
-
-export function runDisplayListRegisters(r: DisplayListRegisters, buffer: ArrayBufferSlice): void {
-    const view = buffer.createDataView();
-
-    for (let i = 0; i < buffer.byteLength;) {
-        const cmd = view.getUint8(i++);
-
-        switch (cmd) {
-        case GX.Command.NOOP:
-            continue;
-
-        case GX.Command.LOAD_BP_REG: {
-            const regBag = view.getUint32(i);
-            i += 4;
-            r.bps(regBag);
-            break;
-        }
-
-        case GX.Command.LOAD_CP_REG: {
-            const regAddr = view.getUint8(i);
-            i++;
-            const regValue = view.getUint32(i);
-            i += 4;
-            r.cp[regAddr] = regValue;
-            break;
-        }
-
-        case GX.Command.LOAD_XF_REG: {
-            const len = view.getUint16(i) + 1;
-            i += 2;
-            assert(len <= 0x10);
-
-            const regAddr = view.getUint16(i);
-            i += 2;
-
-            for (let j = 0; j < len; j++) {
-                r.xfs(regAddr, j, view.getUint32(i));
-                i += 4;
-            }
-
-            // Clear out the other values.
-            for (let j = len; j < 16; j++) {
-                r.xfs(regAddr, j, 0);
-            }
-
-            break;
-        }
-
-        default:
-            console.error(`Unknown command ${cmd} at ${i} (buffer: 0x${buffer.byteOffset.toString(16)})`);
-            throw "whoops 1";
-        }
-    }
-}
-
-function findTevOp(bias: GX.TevBias, scale: GX.TevScale, sub: boolean): GX.TevOp {
-    if (bias === GX.TevBias.$HWB_COMPARE) {
-        switch (scale) {
-        case GX.TevScale.$HWB_R8: return sub ? GX.TevOp.COMP_R8_EQ : GX.TevOp.COMP_R8_GT;
-        case GX.TevScale.$HWB_GR16: return sub ? GX.TevOp.COMP_GR16_EQ : GX.TevOp.COMP_GR16_GT;
-        case GX.TevScale.$HWB_BGR24: return sub ? GX.TevOp.COMP_BGR24_EQ : GX.TevOp.COMP_BGR24_GT;
-        case GX.TevScale.$HWB_RGB8: return sub ? GX.TevOp.COMP_RGB8_EQ : GX.TevOp.COMP_RGB8_GT;
-        default:
-            throw "whoops 2";
-        }
-    } else {
-        return sub ? GX.TevOp.SUB : GX.TevOp.ADD;
-    }
-}
-
 function parseMDL0_TevEntry(buffer: ArrayBufferSlice, r: DisplayListRegisters, numStagesCheck: number): void {
     const view = buffer.createDataView();
 
@@ -333,13 +286,13 @@ function parseMDL0_TevEntry(buffer: ArrayBufferSlice, r: DisplayListRegisters, n
 
     const index = view.getUint32(0x08);
     const numStages = view.getUint8(0x0C);
-    assert(numStages === numStagesCheck);
+    // assert(numStages === numStagesCheck);
 
     const dlOffs = 0x20;
-    runDisplayListRegisters(r, buffer.subarray(dlOffs, 480));
+    displayListRegistersRun(r, buffer.subarray(dlOffs, 480));
 }
 
-export const enum MapMode {
+export enum MapMode {
     TEXCOORD = 0x00,
     ENV_CAMERA = 0x01,
     PROJECTION = 0x02,
@@ -357,7 +310,7 @@ export interface MDL0_TexSrtEntry {
 
 interface MDL0_MaterialSamplerEntry {
     name: string;
-    namePalette: string;
+    namePalette: string | null;
     wrapS: GX.WrapMode;
     wrapT: GX.WrapMode;
     minFilter: GX.TexFilter;
@@ -375,305 +328,10 @@ export interface MDL0_MaterialEntry {
     samplers: MDL0_MaterialSamplerEntry[];
     texSrts: MDL0_TexSrtEntry[];
     indTexMatrices: Float32Array[];
-    colorAmbRegs: GX_Material.Color[];
-    colorMatRegs: GX_Material.Color[];
-    colorRegisters: GX_Material.Color[];
-    colorConstants: GX_Material.Color[];
-}
-
-export function parseMaterialEntry(r: DisplayListRegisters, index: number, name: string, numTexGens: number, numTevs: number, numInds: number): GX_Material.GXMaterial {
-    // TexGens.
-    const texGens: GX_Material.TexGen[] = [];
-
-    for (let i = 0; i < numTexGens; i++) {
-        const v = r.xfg(GX.XFRegister.XF_TEX0_ID + i);
-
-        const enum TexProjection {
-            ST = 0x00,
-            STQ = 0x01,
-        }
-        const enum TexForm {
-            AB11 = 0x00,
-            ABC1 = 0x01,
-        }
-        const enum TexGenType {
-            REGULAR = 0x00,
-            EMBOSS_MAP = 0x01,
-            COLOR_STRGBC0 = 0x02,
-            COLOR_STRGBC1 = 0x02,
-        }
-        const enum TexSourceRow {
-            GEOM = 0x00,
-            NRM = 0x01,
-            CLR = 0x02,
-            BNT = 0x03,
-            BNB = 0x04,
-            TEX0 = 0x05,
-            TEX1 = 0x06,
-            TEX2 = 0x07,
-            TEX3 = 0x08,
-            TEX4 = 0x09,
-            TEX5 = 0x0A,
-            TEX6 = 0x0B,
-            TEX7 = 0x0C,
-        }
-
-        const proj: TexProjection = (v >>>  1) & 0x01;
-        const form: TexForm =       (v >>>  2) & 0x01;
-        const tgType: TexGenType =  (v >>>  4) & 0x02;
-        const src: TexSourceRow =   (v >>>  7) & 0x0F;
-        const embossSrc =           (v >>> 12) & 0x07;
-        const embossLgt =           (v >>> 15) & 0x07;
-
-        let texGenType: GX.TexGenType;
-        let texGenSrc: GX.TexGenSrc;
-
-        if (tgType === TexGenType.REGULAR) {
-            const srcLookup = [
-                GX.TexGenSrc.POS,
-                GX.TexGenSrc.NRM,
-                GX.TexGenSrc.COLOR0,
-                GX.TexGenSrc.BINRM,
-                GX.TexGenSrc.TANGENT,
-                GX.TexGenSrc.TEX0,
-                GX.TexGenSrc.TEX1,
-                GX.TexGenSrc.TEX2,
-                GX.TexGenSrc.TEX3,
-                GX.TexGenSrc.TEX4,
-                GX.TexGenSrc.TEX5,
-                GX.TexGenSrc.TEX6,
-                GX.TexGenSrc.TEX7,
-            ];
-
-            texGenType = proj === TexProjection.ST ? GX.TexGenType.MTX2x4 : GX.TexGenType.MTX3x4;
-            texGenSrc = srcLookup[src];
-        } else if (tgType === TexGenType.EMBOSS_MAP) {
-            texGenType = GX.TexGenType.BUMP0 + embossLgt;
-            texGenSrc = GX.TexGenSrc.TEXCOORD0 + embossSrc;
-        } else if (tgType === TexGenType.COLOR_STRGBC0) {
-            texGenType = GX.TexGenType.SRTG;
-            texGenSrc = GX.TexGenSrc.COLOR0;
-        } else if (tgType === TexGenType.COLOR_STRGBC1) {
-            texGenType = GX.TexGenType.SRTG;
-            texGenSrc = GX.TexGenSrc.COLOR1;
-        }
-
-        const matrix: GX.TexGenMatrix = GX.TexGenMatrix.IDENTITY;
-
-        const dv = r.xfg(GX.XFRegister.XF_DUALTEX0_ID + i);
-        const postMatrix: GX.PostTexGenMatrix = ((dv >>> 0) & 0xFF) + GX.PostTexGenMatrix.PTTEXMTX0;
-        const normalize: boolean = !!((dv >>> 8) & 0x01);
-
-        texGens.push({ index: i, type: texGenType, source: texGenSrc, matrix, normalize, postMatrix });
-    }
-
-    // TEV stages.
-    const tevStages: GX_Material.TevStage[] = [];
-
-    interface TevOrder {
-        texMapId: GX.TexMapID;
-        texCoordId: GX.TexCoordID;
-        channelId: GX.RasColorChannelID;
-    }
-
-    const tevOrders: TevOrder[] = [];
-
-    // First up, parse RAS1_TREF into tev orders.
-    for (let i = 0; i < 8; i++) {
-        const v = r.bp[GX.BPRegister.RAS1_TREF_0_ID + i];
-        const ti0: GX.TexMapID =          (v >>>  0) & 0x07;
-        const tc0: GX.TexCoordID =        (v >>>  3) & 0x07;
-        const te0: boolean =           !!((v >>>  6) & 0x01);
-        const cc0: GX.RasColorChannelID = (v >>>  7) & 0x07;
-        // 7-10 = pad
-        const ti1: GX.TexMapID =          (v >>> 12) & 0x07;
-        const tc1: GX.TexCoordID =        (v >>> 15) & 0x07;
-        const te1: boolean =           !!((v >>> 18) & 0x01);
-        const cc1: GX.RasColorChannelID = (v >>> 19) & 0x07;
-
-        if (i*2+0 >= numTevs)
-            break;
-
-        const order0 = {
-            texMapId: te0 ? ti0 : GX.TexMapID.TEXMAP_NULL,
-            texCoordId: tc0,
-            channelId: cc0,
-        };
-        tevOrders.push(order0);
-
-        if (i*2+1 >= numTevs)
-            break;
-
-        const order1 = {
-            texMapId: te1 ? ti1 : GX.TexMapID.TEXMAP_NULL,
-            texCoordId: tc1,
-            channelId: cc1,
-        };
-        tevOrders.push(order1);
-    }
-
-    assert(tevOrders.length === numTevs);
-
-    // Now parse out individual stages.
-    for (let i = 0; i < tevOrders.length; i++) {
-        const color = r.bp[GX.BPRegister.TEV_COLOR_ENV_0_ID + (i * 2)];
-
-        const colorInD: GX.CombineColorInput = (color >>>  0) & 0x0F;
-        const colorInC: GX.CombineColorInput = (color >>>  4) & 0x0F;
-        const colorInB: GX.CombineColorInput = (color >>>  8) & 0x0F;
-        const colorInA: GX.CombineColorInput = (color >>> 12) & 0x0F;
-        const colorBias: GX.TevBias =          (color >>> 16) & 0x03;
-        const colorSub: boolean =           !!((color >>> 18) & 0x01);
-        const colorClamp: boolean =         !!((color >>> 19) & 0x01);
-        const colorScale: GX.TevScale =        (color >>> 20) & 0x03;
-        const colorRegId: GX.Register =        (color >>> 22) & 0x03;
-
-        const colorOp: GX.TevOp = findTevOp(colorBias, colorScale, colorSub);
-
-        // Find the op.
-        const alpha = r.bp[GX.BPRegister.TEV_ALPHA_ENV_0_ID + (i * 2)];
-
-        const rswap: number =                  (alpha >>>  0) & 0x03;
-        const tswap: number =                  (alpha >>>  2) & 0x03;
-        const alphaInD: GX.CombineAlphaInput = (alpha >>>  4) & 0x07;
-        const alphaInC: GX.CombineAlphaInput = (alpha >>>  7) & 0x07;
-        const alphaInB: GX.CombineAlphaInput = (alpha >>> 10) & 0x07;
-        const alphaInA: GX.CombineAlphaInput = (alpha >>> 13) & 0x07;
-        const alphaBias: GX.TevBias =          (alpha >>> 16) & 0x03;
-        const alphaSub: boolean =           !!((alpha >>> 18) & 0x01);
-        const alphaClamp: boolean =         !!((alpha >>> 19) & 0x01);
-        const alphaScale: GX.TevScale =        (alpha >>> 20) & 0x03;
-        const alphaRegId: GX.Register =        (alpha >>> 22) & 0x03;
-
-        const alphaOp: GX.TevOp = findTevOp(alphaBias, alphaScale, alphaSub);
-
-        const ksel = r.bp[GX.BPRegister.TEV_KSEL_0_ID + (i >>> 1)];
-        const konstColorSel: GX.KonstColorSel = ((i & 1) ? (ksel >>> 14) : (ksel >>> 4)) & 0x1F;
-        const konstAlphaSel: GX.KonstAlphaSel = ((i & 1) ? (ksel >>> 19) : (ksel >>> 9)) & 0x1F;
-
-        const indCmd = r.bp[GX.BPRegister.IND_CMD0_ID + i];
-        const indTexStage: GX.IndTexStageID =   (indCmd >>>  0) & 0x03;
-        const indTexFormat: GX.IndTexFormat =   (indCmd >>>  2) & 0x03;
-        const indTexBiasSel: GX.IndTexBiasSel = (indCmd >>>  4) & 0x07;
-        // alpha sel
-        const indTexMatrix: GX.IndTexMtxID =    (indCmd >>>  9) & 0x0F;
-        const indTexWrapS: GX.IndTexWrap =      (indCmd >>> 13) & 0x07;
-        const indTexWrapT: GX.IndTexWrap =      (indCmd >>> 16) & 0x07;
-        const indTexUseOrigLOD: boolean =    !!((indCmd >>> 19) & 0x01);
-        const indTexAddPrev: boolean =       !!((indCmd >>> 20) & 0x01);
-
-        const rasSwapTableRG = r.bp[GX.BPRegister.TEV_KSEL_0_ID + (rswap * 2)];
-        const rasSwapTableBA = r.bp[GX.BPRegister.TEV_KSEL_0_ID + (rswap * 2) + 1];
-
-        const rasSwapTable: number[] = [
-            (rasSwapTableRG >>> 0) & 0x03,
-            (rasSwapTableRG >>> 2) & 0x03,
-            (rasSwapTableBA >>> 0) & 0x03,
-            (rasSwapTableBA >>> 2) & 0x03,
-        ];
-
-        const texSwapTableRG = r.bp[GX.BPRegister.TEV_KSEL_0_ID + (tswap * 2)];
-        const texSwapTableBA = r.bp[GX.BPRegister.TEV_KSEL_0_ID + (tswap * 2) + 1];
-
-        const texSwapTable: number[] = [
-            (texSwapTableRG >>> 0) & 0x03,
-            (texSwapTableRG >>> 2) & 0x03,
-            (texSwapTableBA >>> 0) & 0x03,
-            (texSwapTableBA >>> 2) & 0x03,
-        ];
-
-        const tevStage: GX_Material.TevStage = {
-            index: i,
-
-            colorInA, colorInB, colorInC, colorInD, colorOp, colorBias, colorClamp, colorScale, colorRegId,
-            alphaInA, alphaInB, alphaInC, alphaInD, alphaOp, alphaBias, alphaClamp, alphaScale, alphaRegId,
-
-            texCoordId: tevOrders[i].texCoordId,
-            texMap: tevOrders[i].texMapId,
-            channelId: tevOrders[i].channelId,
-
-            konstColorSel, konstAlphaSel,
-            rasSwapTable, texSwapTable,
-
-            indTexStage, indTexFormat, indTexBiasSel, indTexMatrix, indTexWrapS, indTexWrapT, indTexAddPrev, indTexUseOrigLOD,
-        };
-
-        tevStages.push(tevStage);
-    }
-
-    // Alpha test.
-    const ap = r.bp[GX.BPRegister.TEV_ALPHAFUNC_ID];
-    const alphaTest: GX_Material.AlphaTest = {
-        referenceA: ((ap >>>  0) & 0xFF) / 0xFF,
-        referenceB: ((ap >>>  8) & 0xFF) / 0xFF,
-        compareA:    (ap >>> 16) & 0x07,
-        compareB:    (ap >>> 19) & 0x07,
-        op:          (ap >>> 22) & 0x07,
-    };
-
-    const cm0 = r.bp[GX.BPRegister.PE_CMODE0_ID];
-    const bmboe = (cm0 >>> 0) & 0x01;
-    const bmloe = (cm0 >>> 1) & 0x01;
-    const bmbop = (cm0 >>> 11) & 0x01;
-
-    const blendType: GX.BlendMode =
-        bmboe ? (bmbop ? GX.BlendMode.SUBTRACT : GX.BlendMode.BLEND) :
-        bmloe ? GX.BlendMode.LOGIC : GX.BlendMode.NONE;;
-    const dstFactor: GX.BlendFactor = (cm0 >>> 5) & 0x07;
-    const srcFactor: GX.BlendFactor = (cm0 >>> 8) & 0x07;
-    const logicOp: GX.LogicOp = (cm0 >>> 12) & 0x0F;
-    const blendMode: GX_Material.BlendMode = {
-        type: blendType,
-        dstFactor, srcFactor, logicOp,
-    };
-
-    const zm = r.bp[GX.BPRegister.PE_ZMODE_ID];
-    const depthTest = !!((zm >>> 0) & 0x01);
-    const depthFunc = (zm >>> 1) & 0x07;
-    const depthWrite = !!((zm >>> 4) & 0x01);
-    const ropInfo: GX_Material.RopInfo = {
-        blendMode, depthFunc, depthTest, depthWrite,
-    };
-
-    const indTexStages: GX_Material.IndTexStage[] = [];
-    const iref = r.bp[GX.BPRegister.RAS1_IREF_ID];
-    for (let i = 0; i < numInds; i++) {
-        const index = i;
-        const ss = r.bp[GX.BPRegister.RAS1_SS0_ID + (index >>> 2)];
-        const scaleS: GX.IndTexScale = (ss >>> ((0x08 * (i & 1)) + 0x00) & 0x0F);
-        const scaleT: GX.IndTexScale = (ss >>> ((0x08 * (i & 1)) + 0x04) & 0x0F);
-        const texture: GX.TexMapID = (iref >>> (0x06*i)) & 0x07;
-        const texCoordId: GX.TexCoordID = (iref >>> (0x06*i)) & 0x07;
-        indTexStages.push({ index, scaleS, scaleT, texCoordId, texture });
-    }
-
-    const lightChannels: GX_Material.LightChannelControl[] = [];
-
-    const gxMaterial: GX_Material.GXMaterial = {
-        index, name,
-        lightChannels, cullMode: GX.CullMode.NONE,
-        tevStages, texGens,
-        indTexStages, alphaTest, ropInfo,
-    };
-
-    autoOptimizeMaterial(gxMaterial);
-
-    return gxMaterial;
-}
-
-function parseColorChannelControlRegister(chanCtrl: number): GX_Material.ColorChannelControl {
-    const matColorSource: GX.ColorSrc =           (chanCtrl >>>  0) & 0x01;
-    const lightingEnabled: boolean =           !!((chanCtrl >>>  1) & 0x01);
-    const litMaskL: number =                      (chanCtrl >>>  2) & 0x0F;
-    const ambColorSource: GX.ColorSrc =           (chanCtrl >>>  6) & 0x01;
-    const diffuseFunction: GX.DiffuseFunction =   (chanCtrl >>>  7) & 0x03;
-    const attnEn: boolean =                    !!((chanCtrl >>>  9) & 0x01);
-    const attnSelect: boolean =                !!((chanCtrl >>> 10) & 0x01);
-    const litMaskH: number =                      (chanCtrl >>> 11) & 0x0F;
-
-    const litMask: number =                       (litMaskH << 4) | litMaskL;
-    const attenuationFunction = attnEn ? (attnSelect ? GX.AttenuationFunction.SPOT : GX.AttenuationFunction.SPEC) : GX.AttenuationFunction.NONE;
-    return { lightingEnabled, matColorSource, ambColorSource, litMask, diffuseFunction, attenuationFunction };
+    colorAmbRegs: Color[];
+    colorMatRegs: Color[];
+    colorRegisters: Color[];
+    colorConstants: Color[];
 }
 
 function parseMDL0_MaterialEntry(buffer: ArrayBufferSlice, version: number): MDL0_MaterialEntry {
@@ -724,14 +382,23 @@ function parseMDL0_MaterialEntry(buffer: ArrayBufferSlice, version: number): MDL
 
     const matDLOffs = view.getUint32(endOfHeaderOffs);
     const matDLSize = 32 + 128 + 64 + 160;
-    runDisplayListRegisters(r, buffer.subarray(matDLOffs, matDLSize));
+    displayListRegistersRun(r, buffer.subarray(matDLOffs, matDLSize));
 
     // Run the TEV registers as well.
     parseMDL0_TevEntry(buffer.subarray(tevOffs), r, numTevs);
 
     // Now combine the whole thing.
-    const gxMaterial = parseMaterialEntry(r, index, name, numTexGens, numTevs, numInds);
-    gxMaterial.cullMode = cullMode;
+    const mb = new GXMaterialBuilder();
+    for (let i = 0; i < numTexGens; i++)
+        mb.setTexGenFromRegisters(r, i);
+    for (let i = 0; i < numTevs; i++)
+        mb.setTevStageFromRegisters(r, i);
+    for (let i = 0; i < numInds; i++)
+        mb.setIndTexStageFromRegisters(r, i);
+    mb.setRopStateFromRegisters(r);
+    mb.setCullMode(cullMode);
+    mb.setColorUpdate(true);
+    mb.setAlphaUpdate(false);
 
     const indTexMatrices: Float32Array[] = [];
     for (let i = 0; i < 3; i++) {
@@ -764,28 +431,28 @@ function parseMDL0_MaterialEntry(buffer: ArrayBufferSlice, version: number): MDL
     }
 
     // Colors.
-    const colorRegisters: GX_Material.Color[] = [];
-    const colorConstants: GX_Material.Color[] = [];
+    const colorRegisters: Color[] = [];
+    const colorConstants: Color[] = [];
     for (let i = 0; i < 8; i++) {
-        const vl = r.kc[i * 2 + 0];
-        const vh = r.kc[i * 2 + 1];
+        const vl = r.tevKColor[i * 2 + 0];
+        const vh = r.tevKColor[i * 2 + 1];
 
         const cr = ((vl >>>  0) & 0x7FF) / 0xFF;
         const ca = ((vl >>> 12) & 0x7FF) / 0xFF;
         const cb = ((vh >>>  0) & 0x7FF) / 0xFF;
         const cg = ((vh >>> 12) & 0x7FF) / 0xFF;
-        const c = new GX_Material.Color(cr, cg, cb, ca);
+        const c = colorNewFromRGBA(cr, cg, cb, ca);
         if (i < 4)
             colorRegisters[i] = c;
         else
             colorConstants[i - 4] = c;
     }
 
-    const colorMatRegs: GX_Material.Color[] = [];
-    const colorAmbRegs: GX_Material.Color[] = [];
+    const colorMatRegs: Color[] = [];
+    const colorAmbRegs: Color[] = [];
     let lightChannelTableIdx = endOfHeaderOffs + 0x3B4;
     for (let i = 0; i < 2; i++) {
-        const enum ChanFlags {
+        enum ChanFlags {
             MATCOLOR_COLOR = (1 << 0),
             MATCOLOR_ALPHA = (1 << 1),
             AMBCOLOR_COLOR = (1 << 2),
@@ -806,17 +473,19 @@ function parseMDL0_MaterialEntry(buffer: ArrayBufferSlice, version: number): MDL
         const chanCtrlC = view.getUint32(lightChannelTableIdx + 0x0C);
         const chanCtrlA = view.getUint32(lightChannelTableIdx + 0x10);
 
-        const colorChannel = parseColorChannelControlRegister(chanCtrlC);
-        const alphaChannel = parseColorChannelControlRegister(chanCtrlA);
+        if (i < numChans) {
+            r.xfSet(GX.XFRegister.XF_COLOR0CNTRL_ID + i, 0, chanCtrlC);
+            r.xfSet(GX.XFRegister.XF_ALPHA0CNTRL_ID + i, 0, chanCtrlA);
+            mb.setColorChannelFromRegisters(r, i);
+        }
 
-        colorMatRegs.push(new GX_Material.Color(matColorR, matColorG, matColorB, matColorA));
-        colorAmbRegs.push(new GX_Material.Color(ambColorR, ambColorG, ambColorB, ambColorA));
-
-        if (i < numChans)
-            gxMaterial.lightChannels.push({ colorChannel, alphaChannel });
+        colorMatRegs.push(colorNewFromRGBA(matColorR, matColorG, matColorB, matColorA));
+        colorAmbRegs.push(colorNewFromRGBA(ambColorR, ambColorG, ambColorB, ambColorA));
 
         lightChannelTableIdx += 0x14;
     }
+
+    const gxMaterial = mb.finish(name);
 
     // Samplers
     const samplers: MDL0_MaterialSamplerEntry[] = [];
@@ -832,7 +501,7 @@ function parseMDL0_MaterialEntry(buffer: ArrayBufferSlice, version: number): MDL
         const wrapT: GX.WrapMode = view.getUint32(texPlttInfoOffs + 0x1C);
         const minFilter: GX.TexFilter = view.getUint32(texPlttInfoOffs + 0x20);
         const magFilter: GX.TexFilter = view.getUint32(texPlttInfoOffs + 0x24);
-        const lodBias = view.getFloat32(texPlttInfoOffs + 0x28) * 1/8;
+        const lodBias = view.getFloat32(texPlttInfoOffs + 0x28);
         const maxAniso = view.getUint32(texPlttInfoOffs + 0x2C);
         const biasClamp = view.getUint8(texPlttInfoOffs + 0x30);
         const edgeLod = view.getUint8(texPlttInfoOffs + 0x31);
@@ -850,11 +519,18 @@ function parseMDL0_MaterialEntry(buffer: ArrayBufferSlice, version: number): MDL
     const texSrts: MDL0_TexSrtEntry[] = [];
     for (let i = 0; i < 8; i++) {
         // SRT
-        const scaleS = view.getFloat32(texSrtTableIdx + 0x00);
-        const scaleT = view.getFloat32(texSrtTableIdx + 0x04);
-        const rotation = view.getFloat32(texSrtTableIdx + 0x08);
-        const translationS = view.getFloat32(texSrtTableIdx + 0x0C);
-        const translationT = view.getFloat32(texSrtTableIdx + 0x10);
+        enum Flags {
+            SCALE_ONE  = 0x02,
+            ROT_ZERO   = 0x04,
+            TRANS_ZERO = 0x08,
+        }
+        const srtFlag: Flags = (srtFlags >>> i * 4) & 0x0F;
+
+        const scaleS = (srtFlag & Flags.SCALE_ONE) ? 1 : view.getFloat32(texSrtTableIdx + 0x00);
+        const scaleT = (srtFlag & Flags.SCALE_ONE) ? 1 : view.getFloat32(texSrtTableIdx + 0x04);
+        const rotation = (srtFlag & Flags.ROT_ZERO) ? 0 : view.getFloat32(texSrtTableIdx + 0x08);
+        const translationS = (srtFlag & Flags.TRANS_ZERO) ? 0 : view.getFloat32(texSrtTableIdx + 0x0C);
+        const translationT = (srtFlag & Flags.TRANS_ZERO) ? 0 : view.getFloat32(texSrtTableIdx + 0x10);
 
         const refCamera = view.getInt8(texMtxTableIdx + 0x00);
         const refLight = view.getInt8(texMtxTableIdx + 0x01);
@@ -924,7 +600,7 @@ interface VtxBufferData {
     offs: 0;
 }
 
-function parseMDL0_VtxData(buffer: ArrayBufferSlice, vtxAttrib: GX.VertexAttribute): VtxBufferData {
+function parseMDL0_VtxData(buffer: ArrayBufferSlice, vtxAttrib: GX.Attr): VtxBufferData {
     const view = buffer.createDataView();
     const dataOffs = view.getUint32(0x08);
     const nameOffs = view.getUint32(0x0C);
@@ -937,7 +613,7 @@ function parseMDL0_VtxData(buffer: ArrayBufferSlice, vtxAttrib: GX.VertexAttribu
     const count: number = view.getUint16(0x1E);
 
     // Color attributes don't have shift -- they store stride in the shift field.
-    if (vtxAttrib === GX.VertexAttribute.CLR0) {
+    if (vtxAttrib === GX.Attr.CLR0) {
         stride = compShift;
         compShift = 0;
     }
@@ -960,7 +636,7 @@ interface InputVertexBuffers {
     txc: VtxBufferData[];
 }
 
-function parseInputBufferSet(buffer: ArrayBufferSlice, vtxAttrib: GX.VertexAttribute, resDic: ResDicEntry[]): VtxBufferData[] {
+function parseInputBufferSet(buffer: ArrayBufferSlice, vtxAttrib: GX.Attr, resDic: ResDicEntry[]): VtxBufferData[] {
     const vtxBuffers: VtxBufferData[] = [];
     for (let i = 0; i < resDic.length; i++) {
         const entry = resDic[i];
@@ -973,10 +649,10 @@ function parseInputBufferSet(buffer: ArrayBufferSlice, vtxAttrib: GX.VertexAttri
 }
 
 function parseInputVertexBuffers(buffer: ArrayBufferSlice, vtxPosResDic: ResDicEntry[], vtxNrmResDic: ResDicEntry[], vtxClrResDic: ResDicEntry[], vtxTxcResDic: ResDicEntry[]): InputVertexBuffers {
-    const pos = parseInputBufferSet(buffer, GX.VertexAttribute.POS, vtxPosResDic);
-    const nrm = parseInputBufferSet(buffer, GX.VertexAttribute.NRM, vtxNrmResDic);
-    const clr = parseInputBufferSet(buffer, GX.VertexAttribute.CLR0, vtxClrResDic);
-    const txc = parseInputBufferSet(buffer, GX.VertexAttribute.TEX0, vtxTxcResDic);
+    const pos = parseInputBufferSet(buffer, GX.Attr.POS, vtxPosResDic);
+    const nrm = parseInputBufferSet(buffer, GX.Attr.NRM, vtxNrmResDic);
+    const clr = parseInputBufferSet(buffer, GX.Attr.CLR0, vtxClrResDic);
+    const txc = parseInputBufferSet(buffer, GX.Attr.TEX0, vtxTxcResDic);
     return { pos, nrm, clr, txc };
 }
 
@@ -1001,7 +677,7 @@ function parseMDL0_ShapeEntry(buffer: ArrayBufferSlice, inputBuffers: InputVerte
     const primDLCmdSize = view.getUint32(0x28);
     const primDLOffs = 0x24 + view.getUint32(0x2C);
 
-    const enum VcdFlags {
+    enum VcdFlags {
         PNMTXIDX   = 1 << 0,
         TEX0MTXIDX = 1 << 1,
         TEX1MTXIDX = 1 << 2,
@@ -1052,37 +728,37 @@ function parseMDL0_ShapeEntry(buffer: ArrayBufferSlice, inputBuffers: InputVerte
 
     // Run preprim. This should get us our VAT / VCD.
     const r = new DisplayListRegisters();
-    runDisplayListRegisters(r, buffer.subarray(prePrimDLOffs, prePrimDLSize));
+    displayListRegistersRun(r, buffer.subarray(prePrimDLOffs, prePrimDLSize));
 
     // VCD. Describes primitive data.
     const vcdL = r.cp[GX.CPRegister.VCD_LO_ID];
     const vcdH = r.cp[GX.CPRegister.VCD_HI_ID];
     const vcd: GX_VtxDesc[] = [];
 
-    vcd[GX.VertexAttribute.PNMTXIDX] =   { type: (vcdL >>>  0) & 0x01 };
-    vcd[GX.VertexAttribute.TEX0MTXIDX] = { type: (vcdL >>>  1) & 0x01 };
-    vcd[GX.VertexAttribute.TEX1MTXIDX] = { type: (vcdL >>>  2) & 0x01 };
-    vcd[GX.VertexAttribute.TEX2MTXIDX] = { type: (vcdL >>>  3) & 0x01 };
-    vcd[GX.VertexAttribute.TEX3MTXIDX] = { type: (vcdL >>>  4) & 0x01 };
-    vcd[GX.VertexAttribute.TEX4MTXIDX] = { type: (vcdL >>>  5) & 0x01 };
-    vcd[GX.VertexAttribute.TEX5MTXIDX] = { type: (vcdL >>>  6) & 0x01 };
-    vcd[GX.VertexAttribute.TEX6MTXIDX] = { type: (vcdL >>>  7) & 0x01 };
-    vcd[GX.VertexAttribute.TEX7MTXIDX] = { type: (vcdL >>>  8) & 0x01 };
-    vcd[GX.VertexAttribute.POS] =        { type: (vcdL >>>  9) & 0x03 };
-    vcd[GX.VertexAttribute.NRM] =        { type: (vcdL >>> 11) & 0x03 };
-    vcd[GX.VertexAttribute.CLR0] =       { type: (vcdL >>> 13) & 0x03 };
-    vcd[GX.VertexAttribute.CLR1] =       { type: (vcdL >>> 15) & 0x03 };
-    vcd[GX.VertexAttribute.TEX0] =       { type: (vcdH >>>  0) & 0x03 };
-    vcd[GX.VertexAttribute.TEX1] =       { type: (vcdH >>>  2) & 0x03 };
-    vcd[GX.VertexAttribute.TEX2] =       { type: (vcdH >>>  4) & 0x03 };
-    vcd[GX.VertexAttribute.TEX3] =       { type: (vcdH >>>  6) & 0x03 };
-    vcd[GX.VertexAttribute.TEX4] =       { type: (vcdH >>>  8) & 0x03 };
-    vcd[GX.VertexAttribute.TEX5] =       { type: (vcdH >>> 10) & 0x03 };
-    vcd[GX.VertexAttribute.TEX6] =       { type: (vcdH >>> 12) & 0x03 };
-    vcd[GX.VertexAttribute.TEX7] =       { type: (vcdH >>> 14) & 0x03 };
+    vcd[GX.Attr.PNMTXIDX] =   { type: (vcdL >>>  0) & 0x01 };
+    vcd[GX.Attr.TEX0MTXIDX] = { type: (vcdL >>>  1) & 0x01 };
+    vcd[GX.Attr.TEX1MTXIDX] = { type: (vcdL >>>  2) & 0x01 };
+    vcd[GX.Attr.TEX2MTXIDX] = { type: (vcdL >>>  3) & 0x01 };
+    vcd[GX.Attr.TEX3MTXIDX] = { type: (vcdL >>>  4) & 0x01 };
+    vcd[GX.Attr.TEX4MTXIDX] = { type: (vcdL >>>  5) & 0x01 };
+    vcd[GX.Attr.TEX5MTXIDX] = { type: (vcdL >>>  6) & 0x01 };
+    vcd[GX.Attr.TEX6MTXIDX] = { type: (vcdL >>>  7) & 0x01 };
+    vcd[GX.Attr.TEX7MTXIDX] = { type: (vcdL >>>  8) & 0x01 };
+    vcd[GX.Attr.POS] =        { type: (vcdL >>>  9) & 0x03 };
+    vcd[GX.Attr.NRM] =        { type: (vcdL >>> 11) & 0x03 };
+    vcd[GX.Attr.CLR0] =       { type: (vcdL >>> 13) & 0x03 };
+    vcd[GX.Attr.CLR1] =       { type: (vcdL >>> 15) & 0x03 };
+    vcd[GX.Attr.TEX0] =       { type: (vcdH >>>  0) & 0x03 };
+    vcd[GX.Attr.TEX1] =       { type: (vcdH >>>  2) & 0x03 };
+    vcd[GX.Attr.TEX2] =       { type: (vcdH >>>  4) & 0x03 };
+    vcd[GX.Attr.TEX3] =       { type: (vcdH >>>  6) & 0x03 };
+    vcd[GX.Attr.TEX4] =       { type: (vcdH >>>  8) & 0x03 };
+    vcd[GX.Attr.TEX5] =       { type: (vcdH >>> 10) & 0x03 };
+    vcd[GX.Attr.TEX6] =       { type: (vcdH >>> 12) & 0x03 };
+    vcd[GX.Attr.TEX7] =       { type: (vcdH >>> 14) & 0x03 };
 
     // Validate against our VCD flags.
-    for (let attr: GX.VertexAttribute = 0; attr <= GX.VertexAttribute.TEX7; attr++) {
+    for (let attr: GX.Attr = 0; attr <= GX.Attr.TEX7; attr++) {
         const vcdFlagsEnabled = !!(vcdFlags & (1 << attr));
         const vcdEnabled = !!(vcd[attr].type !== GX.AttrType.NONE);
         // Some community tooling doesn't export correct vcdFlags. Ignore it and use VCD regs as source of truth.
@@ -1101,57 +777,58 @@ function parseMDL0_ShapeEntry(buffer: ArrayBufferSlice, inputBuffers: InputVerte
 
     const vat: GX_VtxAttrFmt[] = [];
     //                                        compCnt               compType              compShift
-    vat[GX.VertexAttribute.POS]      = vatFmt((vatA >>>  0) & 0x01, (vatA >>>  1) & 0x07, (vatA >>>  4) & 0x1F);
+    vat[GX.Attr.POS]      = vatFmt((vatA >>>  0) & 0x01, (vatA >>>  1) & 0x07, (vatA >>>  4) & 0x1F);
     const nrm3 = !!(vatA >>> 31);
     const nrmCnt = nrm3 ? GX.CompCnt.NRM_NBT3:(vatA >>>  9) & 0x01;
-    vat[GX.VertexAttribute.NRM]      = vatFmt(nrmCnt,               (vatA >>> 10) & 0x07, 0);
-    vat[GX.VertexAttribute.CLR0]     = vatFmt((vatA >>> 13) & 0x01, (vatA >>> 14) & 0x07, 0);
-    vat[GX.VertexAttribute.CLR1]     = vatFmt((vatA >>> 17) & 0x01, (vatA >>> 18) & 0x07, 0);
-    vat[GX.VertexAttribute.TEX0]     = vatFmt((vatA >>> 21) & 0x01, (vatA >>> 22) & 0x07, (vatA >>> 25) & 0x1F);
-    vat[GX.VertexAttribute.TEX1]     = vatFmt((vatB >>>  0) & 0x01, (vatB >>>  1) & 0x07, (vatB >>>  4) & 0x1F);
-    vat[GX.VertexAttribute.TEX2]     = vatFmt((vatB >>>  9) & 0x01, (vatB >>> 10) & 0x07, (vatB >>> 13) & 0x1F);
-    vat[GX.VertexAttribute.TEX3]     = vatFmt((vatB >>> 18) & 0x01, (vatB >>> 19) & 0x07, (vatB >>> 22) & 0x1F);
-    vat[GX.VertexAttribute.TEX4]     = vatFmt((vatB >>> 27) & 0x01, (vatB >>> 28) & 0x07, (vatC >>>  0) & 0x1F);
-    vat[GX.VertexAttribute.TEX5]     = vatFmt((vatC >>>  5) & 0x01, (vatC >>>  6) & 0x07, (vatC >>>  9) & 0x1F);
-    vat[GX.VertexAttribute.TEX6]     = vatFmt((vatC >>> 14) & 0x01, (vatC >>> 15) & 0x07, (vatC >>> 18) & 0x1F);
-    vat[GX.VertexAttribute.TEX7]     = vatFmt((vatC >>> 23) & 0x01, (vatC >>> 24) & 0x07, (vatC >>> 27) & 0x1F);
+    vat[GX.Attr.NRM]      = vatFmt(nrmCnt,               (vatA >>> 10) & 0x07, 0);
+    vat[GX.Attr.CLR0]     = vatFmt((vatA >>> 13) & 0x01, (vatA >>> 14) & 0x07, 0);
+    vat[GX.Attr.CLR1]     = vatFmt((vatA >>> 17) & 0x01, (vatA >>> 18) & 0x07, 0);
+    vat[GX.Attr.TEX0]     = vatFmt((vatA >>> 21) & 0x01, (vatA >>> 22) & 0x07, (vatA >>> 25) & 0x1F);
+    vat[GX.Attr.TEX1]     = vatFmt((vatB >>>  0) & 0x01, (vatB >>>  1) & 0x07, (vatB >>>  4) & 0x1F);
+    vat[GX.Attr.TEX2]     = vatFmt((vatB >>>  9) & 0x01, (vatB >>> 10) & 0x07, (vatB >>> 13) & 0x1F);
+    vat[GX.Attr.TEX3]     = vatFmt((vatB >>> 18) & 0x01, (vatB >>> 19) & 0x07, (vatB >>> 22) & 0x1F);
+    vat[GX.Attr.TEX4]     = vatFmt((vatB >>> 27) & 0x01, (vatB >>> 28) & 0x07, (vatC >>>  0) & 0x1F);
+    vat[GX.Attr.TEX5]     = vatFmt((vatC >>>  5) & 0x01, (vatC >>>  6) & 0x07, (vatC >>>  9) & 0x1F);
+    vat[GX.Attr.TEX6]     = vatFmt((vatC >>> 14) & 0x01, (vatC >>> 15) & 0x07, (vatC >>> 18) & 0x1F);
+    vat[GX.Attr.TEX7]     = vatFmt((vatC >>> 23) & 0x01, (vatC >>> 24) & 0x07, (vatC >>> 27) & 0x1F);
 
     const vtxArrays: GX_Array[] = [];
     assert(idVtxPos >= 0);
     if (idVtxPos >= 0)
-        vtxArrays[GX.VertexAttribute.POS] = inputBuffers.pos[idVtxPos];
+        vtxArrays[GX.Attr.POS] = inputBuffers.pos[idVtxPos];
     if (idVtxNrm >= 0)
-        vtxArrays[GX.VertexAttribute.NRM] = inputBuffers.nrm[idVtxNrm];
+        vtxArrays[GX.Attr.NRM] = inputBuffers.nrm[idVtxNrm];
     if (idVtxClr0 >= 0)
-        vtxArrays[GX.VertexAttribute.CLR0] = inputBuffers.clr[idVtxClr0];
+        vtxArrays[GX.Attr.CLR0] = inputBuffers.clr[idVtxClr0];
     if (idVtxClr1 >= 0)
-        vtxArrays[GX.VertexAttribute.CLR1] = inputBuffers.clr[idVtxClr1];
+        vtxArrays[GX.Attr.CLR1] = inputBuffers.clr[idVtxClr1];
     if (idVtxTxc0 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX0] = inputBuffers.txc[idVtxTxc0];
+        vtxArrays[GX.Attr.TEX0] = inputBuffers.txc[idVtxTxc0];
     if (idVtxTxc1 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX1] = inputBuffers.txc[idVtxTxc1];
+        vtxArrays[GX.Attr.TEX1] = inputBuffers.txc[idVtxTxc1];
     if (idVtxTxc2 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX2] = inputBuffers.txc[idVtxTxc2];
+        vtxArrays[GX.Attr.TEX2] = inputBuffers.txc[idVtxTxc2];
     if (idVtxTxc3 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX3] = inputBuffers.txc[idVtxTxc3];
+        vtxArrays[GX.Attr.TEX3] = inputBuffers.txc[idVtxTxc3];
     if (idVtxTxc4 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX4] = inputBuffers.txc[idVtxTxc4];
+        vtxArrays[GX.Attr.TEX4] = inputBuffers.txc[idVtxTxc4];
     if (idVtxTxc5 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX5] = inputBuffers.txc[idVtxTxc5];
+        vtxArrays[GX.Attr.TEX5] = inputBuffers.txc[idVtxTxc5];
     if (idVtxTxc6 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX6] = inputBuffers.txc[idVtxTxc6];
+        vtxArrays[GX.Attr.TEX6] = inputBuffers.txc[idVtxTxc6];
     if (idVtxTxc7 >= 0)
-        vtxArrays[GX.VertexAttribute.TEX7] = inputBuffers.txc[idVtxTxc7];
+        vtxArrays[GX.Attr.TEX7] = inputBuffers.txc[idVtxTxc7];
 
     const vtxLoader = compileVtxLoader(vat, vcd);
     const loadedVertexLayout = vtxLoader.loadedVertexLayout;
     const loadedVertexData = vtxLoader.runVertices(vtxArrays, buffer.subarray(primDLOffs, primDLSize));
-    assert(loadedVertexData.totalVertexCount === numVertices);
+    if (loadedVertexData.totalVertexCount !== numVertices)
+        console.warn("Vertex count mismatch", loadedVertexData.totalVertexCount, numVertices);
 
     return { name, mtxIdx, loadedVertexLayout, loadedVertexData };
 }
 
-export const enum NodeFlags {
+export enum NodeFlags {
     SRT_IDENTITY      = 0x00000001,
     TRANS_ZERO        = 0x00000002,
     ROT_ZERO          = 0x00000004,
@@ -1161,7 +838,7 @@ export const enum NodeFlags {
     REFER_BB_ANCESTOR = 0x00000400,
 }
 
-export const enum BillboardMode {
+export enum BillboardMode {
     NONE = 0,
     BILLBOARD,
     PERSP_BILLBOARD,
@@ -1179,11 +856,12 @@ export interface MDL0_NodeEntry {
     billboardMode: BillboardMode;
     billboardRefNodeId: number;
     modelMatrix: mat4;
-    bbox: AABB;
+    bbox: AABB | null;
     visible: boolean;
     parentNodeId: number;
     forwardBindPose: mat4;
     inverseBindPose: mat4;
+    userData: ResUserData | null;
 }
 
 function parseMDL0_NodeEntry(buffer: ArrayBufferSlice, entryOffs: number, baseOffs: number): MDL0_NodeEntry {
@@ -1197,6 +875,8 @@ function parseMDL0_NodeEntry(buffer: ArrayBufferSlice, entryOffs: number, baseOf
     const billboardMode: BillboardMode = view.getUint32(0x18);
     const billboardRefNodeId = view.getUint32(0x1C);
 
+    const modelMatrix = mat4.create();
+
     const scaleX = view.getFloat32(0x20);
     const scaleY = view.getFloat32(0x24);
     const scaleZ = view.getFloat32(0x28);
@@ -1207,7 +887,6 @@ function parseMDL0_NodeEntry(buffer: ArrayBufferSlice, entryOffs: number, baseOf
     const translationY = view.getFloat32(0x3C);
     const translationZ = view.getFloat32(0x40);
 
-    const modelMatrix = mat4.create();
     computeModelMatrixSRT(modelMatrix, scaleX, scaleY, scaleZ, rotationX, rotationY, rotationZ, translationX, translationY, translationZ);
 
     // TODO(jstpierre): NW4R doesn't appear to use this anymore?
@@ -1227,6 +906,8 @@ function parseMDL0_NodeEntry(buffer: ArrayBufferSlice, entryOffs: number, baseOf
     const toNextSibling = view.getInt32(0x64);
     const toPrevSibling = view.getInt32(0x68);
     const toResUserData = view.getInt32(0x6C);
+
+    const userData = parseUserData(buffer, toResUserData);
 
     let parentNodeId: number = -1;
     if (toParentNode !== 0) {
@@ -1280,16 +961,16 @@ function parseMDL0_NodeEntry(buffer: ArrayBufferSlice, entryOffs: number, baseOf
 
     const visible = !!(flags & NodeFlags.VISIBLE);
 
-    return { name, id, mtxId, flags, billboardMode, billboardRefNodeId, modelMatrix, bbox, visible, parentNodeId, forwardBindPose, inverseBindPose };
+    return { name, id, userData, mtxId, flags, billboardMode, billboardRefNodeId, modelMatrix, bbox, visible, parentNodeId, forwardBindPose, inverseBindPose };
 }
 
-export const enum ByteCodeOp {
+export enum ByteCodeOp {
     NOP = 0x00,
     RET = 0x01,
     NODEDESC = 0x02, // NodeID ParentMtxID
     NODEMIX = 0x03, // TODO
     DRAW = 0x04, // MatID ShpID NodeID
-    EVPMTX = 0x05, // TODO
+    EVPMTX = 0x05, // MtxID NodeID
     MTXDUP = 0x06, // ToMtxID FromMtxID
 };
 
@@ -1417,8 +1098,7 @@ interface MDL0_SceneGraph {
 }
 
 function parseMDL0_SceneGraph(buffer: ArrayBufferSlice, byteCodeResDic: ResDicEntry[]): MDL0_SceneGraph {
-    const nodeTreeResDicEntry = byteCodeResDic.find((entry) => entry.name === "NodeTree");
-    assert(nodeTreeResDicEntry !== null);
+    const nodeTreeResDicEntry = assertExists(byteCodeResDic.find((entry) => entry.name === "NodeTree"));
     const nodeTreeBuffer = buffer.subarray(nodeTreeResDicEntry.offs);
     const nodeTreeOps = parseMDL0_NodeTreeBytecode(nodeTreeBuffer);
 
@@ -1507,7 +1187,7 @@ function parseMDL0(buffer: ArrayBufferSlice): MDL0 {
 
     const numViewMtx = view.getUint32(infoOffs + 0x1C);
     const needNrmMtxArray = !!view.getUint8(infoOffs + 0x20);
-    const needTexMtxArray = !!view.getUint8(infoOffs + 0x20);
+    const needTexMtxArray = !!view.getUint8(infoOffs + 0x21);
     const isValidBBox = !!view.getUint8(infoOffs + 0x22);
 
     const mtxIdToNodeIdOffs = infoOffs + view.getUint32(infoOffs + 0x24);
@@ -1556,12 +1236,12 @@ function parseMDL0(buffer: ArrayBufferSlice): MDL0 {
 }
 //#endregion
 //#region Animation Core
-export const enum LoopMode {
+export enum LoopMode {
     ONCE = 0x00,
     REPEAT = 0x01,
 }
 
-const enum AnimationTrackType {
+enum AnimationTrackType {
     LINEAR,
     HERMITE,
 }
@@ -1598,7 +1278,7 @@ function getAnimFrame(anim: AnimationBase, frame: number): number {
             frame = lastFrame;
         return frame;
     } else if (anim.loopMode === LoopMode.REPEAT) {
-        while (frame > lastFrame)
+        while (lastFrame > 0 && frame > lastFrame)
             frame -= lastFrame;
         return frame;
     } else {
@@ -1888,11 +1568,11 @@ export interface SRT0 extends AnimationBase {
 }
 
 function findAnimationData_SRT0(srt0: SRT0, materialName: string, texMtxIndex: number): SRT0_TexData | null {
-    const matData: SRT0_MatData = srt0.matAnimations.find((m) => m.materialName === materialName);
+    const matData = srt0.matAnimations.find((m) => m.materialName === materialName);
     if (matData === undefined)
         return null;
 
-    const texData: SRT0_TexData = matData.texAnimations[texMtxIndex];
+    const texData = matData.texAnimations[texMtxIndex];
     if (texData === undefined)
         return null;
 
@@ -1902,7 +1582,7 @@ function findAnimationData_SRT0(srt0: SRT0, materialName: string, texMtxIndex: n
 function parseSRT0_TexData(buffer: ArrayBufferSlice): SRT0_TexData {
     const view = buffer.createDataView();
 
-    const enum Flags {
+    enum Flags {
         SCALE_ONE        = 0x002,
         ROT_ZERO         = 0x004,
         TRANS_ZERO       = 0x008,
@@ -2006,8 +1686,6 @@ function parseSRT0(buffer: ArrayBufferSlice): SRT0 {
 }
 
 export class SRT0TexMtxAnimator {
-    private scratch = mat4.create();
-
     constructor(public animationController: AnimationController, public srt0: SRT0, public texData: SRT0_TexData) {
     }
 
@@ -2026,7 +1704,7 @@ export class SRT0TexMtxAnimator {
     }
 
     public calcIndTexMtx(dst: mat4): void {
-        this._calcTexMtx(this.scratch, TexMatrixMode.BASIC);
+        this._calcTexMtx(dst, TexMatrixMode.Basic);
     }
 
     public calcTexMtx(dst: mat4): void {
@@ -2082,18 +1760,6 @@ export interface PAT0 extends AnimationBase {
     texNames: string[];
 }
 
-function findAnimationData_PAT0(pat0: PAT0, materialName: string, texMapID: GX.TexMapID): PAT0_TexData | null {
-    const matData: PAT0_MatData = pat0.matAnimations.find((m) => m.materialName === materialName);
-    if (matData === undefined)
-        return null;
-
-    const texData: PAT0_TexData = matData.texAnimations[texMapID];
-    if (texData === undefined)
-        return null;
-
-    return texData;
-}
-
 function parsePAT0_MatData(buffer: ArrayBufferSlice): PAT0_MatData {
     const view = buffer.createDataView();
 
@@ -2101,7 +1767,7 @@ function parsePAT0_MatData(buffer: ArrayBufferSlice): PAT0_MatData {
     const materialName = readString(buffer, materialNameOffs);
     const flags = view.getUint32(0x04);
 
-    const enum Flags {
+    enum Flags {
         EXISTS = 1 << 0,
         CONSTANT = 1 << 1,
         TEX_EXISTS = 1 << 2,
@@ -2212,7 +1878,7 @@ function findFrameData<T extends { frame: number }>(frames: T[], frame: number):
 
     // Find the left-hand frame.
     let idx0 = frames.length;
-    while (idx0-- > 0) {
+    while (--idx0 > 0) {
         if (frame >= frames[idx0].frame)
             break;
     }
@@ -2221,29 +1887,25 @@ function findFrameData<T extends { frame: number }>(frames: T[], frame: number):
 }
 
 export class PAT0TexAnimator {
-    constructor(public animationController: AnimationController, public pat0: PAT0, public texData: PAT0_TexData) {
+    private textureMappings: GXTextureMapping[];
+    constructor(public animationController: AnimationController, public pat0: PAT0, public texData: PAT0_TexData, modelInstance: MDL0ModelInstance) {
+        // XXX(jstpierre): Not all of these textures are necessarily used by this specific material, maybe something to fix later...
+        this.textureMappings = nArray(this.pat0.texNames.length, () => new GXTextureMapping());
+        for (let i = 0; i < this.textureMappings.length; i++)
+            modelInstance.textureHolder!.fillTextureMapping(this.textureMappings[i], this.pat0.texNames[i]);
     }
 
-    public fillTextureMapping(textureMapping: TextureMapping, textureHolder: GXTextureHolder): void {
+    public fillTextureMapping(dst: GXTextureMapping): void {
         const texData = this.texData;
+        if (!texData.texIndexValid)
+            return;
 
         const frame = this.animationController.getTimeInFrames();
         const animFrame = getAnimFrame(this.pat0, frame);
 
         const texFrameData = findFrameData(texData.animationTrack, animFrame);
-
-        if (texData.texIndexValid) {
-            const texName = this.pat0.texNames[texFrameData.texIndex];
-            textureHolder.fillTextureMapping(textureMapping, texName);
-        }
+        dst.copy(this.textureMappings[texFrameData.texIndex]);
     }
-}
-
-export function bindPAT0Animator(animationController: AnimationController, pat0: PAT0, materialName: string, texMapID: GX.TexMapID): PAT0TexAnimator | null {
-    const texData: PAT0_TexData | null = findAnimationData_PAT0(pat0, materialName, texMapID);
-    if (texData === null)
-        return null;
-    return new PAT0TexAnimator(animationController, pat0, texData);
 }
 //#endregion
 //#region CLR0
@@ -2277,11 +1939,11 @@ export interface CLR0 extends AnimationBase {
 }
 
 function findAnimationData_CLR0(clr0: CLR0, materialName: string, color: AnimatableColor): CLR0_ColorData | null {
-    const matData: CLR0_MatData = clr0.matAnimations.find((m) => m.materialName === materialName);
+    const matData = clr0.matAnimations.find((m) => m.materialName === materialName);
     if (matData === undefined)
         return null;
 
-    const clrData: CLR0_ColorData = matData.clrAnimations[color];
+    const clrData = matData.clrAnimations[color];
     if (clrData === undefined)
         return null;
 
@@ -2295,7 +1957,7 @@ function parseCLR0_MatData(buffer: ArrayBufferSlice, numKeyframes: number): CLR0
     const materialName = readString(buffer, materialNameOffs);
     const flags = view.getUint32(0x04);
 
-    const enum Flags {
+    enum Flags {
         EXISTS = 1 << 0,
         CONSTANT = 1 << 1,
     };
@@ -2358,7 +2020,7 @@ export class CLR0ColorAnimator {
     constructor(public animationController: AnimationController, public clr0: CLR0, public clrData: CLR0_ColorData) {
     }
 
-    public calcColor(dst: GX_Material.Color, orig: GX_Material.Color): void {
+    public calcColor(dst: Color, orig: Color): void {
         const clrData = this.clrData;
 
         const frame = this.animationController.getTimeInFrames();
@@ -2393,7 +2055,7 @@ interface CHR0_NodeData {
 }
 
 function parseCHR0_NodeData(buffer: ArrayBufferSlice, numKeyframes: number): CHR0_NodeData {
-    const enum Flags {
+    enum Flags {
         IDENTITY                = (1 <<  1),
         RT_ZERO                 = (1 <<  2),
         SCALE_ONE               = (1 <<  3),
@@ -2465,8 +2127,7 @@ function parseCHR0_NodeData(buffer: ArrayBufferSlice, numKeyframes: number): CHR
             const animationTrackOffs = view.getUint32(animationTableIdx);
             animationTrack = parseAnimationTrackC32(buffer.slice(animationTrackOffs), numKeyframes);
         } else {
-            console.warn("Unsupported animation track format", trackFormat);
-            animationTrack = null;
+            throw new Error(`Unsupported animation track format ${trackFormat}`);
         }
         animationTableIdx += 0x04;
         return animationTrack;
@@ -2554,53 +2215,6 @@ export class CHR0NodesAnimator {
     constructor(public animationController: AnimationController, public chr0: CHR0, private nodeData: CHR0_NodeData[]) {
     }
 
-    private vizNodeId: number = undefined;
-    private vizGraph: Graph;
-    public viz(nodeId: number) {
-        this.vizNodeId = nodeId;
-        this.vizGraph = new Graph(cv());
-    }
-
-    private updviz(animFrame: number, nodeData: CHR0_NodeData) {
-        const numFrames = this.chr0.duration;
-        const ctx = this.vizGraph.ctx;
-
-        const scale = 10;
-        const maxt = (numFrames / scale) | 0;
-        const offt = animFrame - maxt / 2;
-
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-
-        if (nodeData.rotationX) {
-            this.vizGraph.graphF('red', (t: number) => {
-                const animFrame = getAnimFrame(this.chr0, t + offt);
-                return sampleFloatAnimationTrack(nodeData.rotationX, animFrame);
-            }, maxt);
-        }
-
-        if (nodeData.rotationY) {
-            this.vizGraph.graphF('green', (t: number) => {
-                const animFrame = getAnimFrame(this.chr0, t + offt);
-                return sampleFloatAnimationTrack(nodeData.rotationY, animFrame);
-            }, maxt);
-        }
-
-        if (nodeData.rotationZ) {
-            this.vizGraph.graphF('blue', (t: number) => {
-                const animFrame = getAnimFrame(this.chr0, t + offt);
-                return sampleFloatAnimationTrack(nodeData.rotationZ, animFrame);
-            }, maxt);
-        }
-
-        // const xa = (animFrame / numFrames) * ctx.canvas.width;
-        const xa = (0.5) * ctx.canvas.width;
-        ctx.beginPath();
-        ctx.strokeStyle = 'black';
-        ctx.lineTo(xa, 0);
-        ctx.lineTo(xa, ctx.canvas.height);
-        ctx.stroke();
-    }
 
     public calcModelMtx(dst: mat4, nodeId: number): boolean {
         const nodeData = this.nodeData[nodeId];
@@ -2612,9 +2226,6 @@ export class CHR0NodesAnimator {
 
         const frame = this.animationController.getTimeInFrames();
         const animFrame = getAnimFrame(this.chr0, frame);
-
-        if (this.vizNodeId === nodeId)
-            this.updviz(animFrame, nodeData);
 
         const scaleX = nodeData.scaleX ? sampleFloatAnimationTrack(nodeData.scaleX, animFrame) : 1;
         const scaleY = nodeData.scaleY ? sampleFloatAnimationTrack(nodeData.scaleY, animFrame) : 1;
@@ -2656,7 +2267,7 @@ export interface VIS0_NodeData {
 }
 
 function parseVIS0_NodeData(buffer: ArrayBufferSlice, duration: number): VIS0_NodeData {
-    const enum Flags {
+    enum Flags {
         CONSTANT_VALUE = 0x01,
         IS_CONSTANT = 0x02,
     };
@@ -2719,7 +2330,7 @@ export class VIS0NodesAnimator {
         const frame = this.animationController.getTimeInFrames();
         const animFrame = getAnimFrame(this.vis0, frame);
 
-        return sampleAnimationTrackBoolean(nodeData.nodeVisibility, frame);
+        return sampleAnimationTrackBoolean(nodeData.nodeVisibility, animFrame);
     }
 }
 
@@ -2807,7 +2418,7 @@ function parseSCN0_AmbLight(buffer: ArrayBufferSlice, version: number, numKeyfra
     const index = view.getUint32(0x0C);
     const refNumber = view.getUint32(0x10);
 
-    const enum Flags {
+    enum Flags {
         HAS_COLOR = 1 << 0,
         HAS_ALPHA = 1 << 1,
 
@@ -2823,7 +2434,7 @@ function parseSCN0_AmbLight(buffer: ArrayBufferSlice, version: number, numKeyfra
     return { name, refNumber, hasColor, hasAlpha, color };
 }
 
-export const enum SCN0_LightType {
+export enum SCN0_LightType {
     POINT, DIRECTIONAL, SPOT,
 }
 
@@ -2845,7 +2456,7 @@ export interface SCN0_Light {
     aimY: FloatAnimationTrack;
     aimZ: FloatAnimationTrack;
 
-    distFunc: GX.AttenuationFunction;
+    distFunc: GX.DistAttnFunction;
     refDistance: FloatAnimationTrack;
     refBrightness: FloatAnimationTrack;
 
@@ -2868,7 +2479,7 @@ function parseSCN0_Light(buffer: ArrayBufferSlice, version: number, numKeyframes
 
     const specLightObjIdx = view.getUint32(0x14);
 
-    const enum Flags {
+    enum Flags {
         ENABLE        = 1 << 2,
         HAS_SPECULAR  = 1 << 3,
         HAS_COLOR     = 1 << 4,
@@ -2905,7 +2516,7 @@ function parseSCN0_Light(buffer: ArrayBufferSlice, version: number, numKeyframes
     const aimY = parseAnimationTrackF96OrConst(buffer.slice(0x38), !!(flags & Flags.AIMY_CONSTANT));
     const aimZ = parseAnimationTrackF96OrConst(buffer.slice(0x3C), !!(flags & Flags.AIMZ_CONSTANT));
 
-    const distFunc: GX.AttenuationFunction = view.getUint32(0x40);
+    const distFunc: GX.DistAttnFunction = view.getUint32(0x40);
     const refDistance = parseAnimationTrackF96OrConst(buffer.slice(0x44), !!(flags & Flags.REFDISTANCE_CONSTANT));
     const refBrightness = parseAnimationTrackF96OrConst(buffer.slice(0x48), !!(flags & Flags.REFBRIGHTNESS_CONSTANT));
 
@@ -2942,24 +2553,24 @@ function parseSCN0_Fog(buffer: ArrayBufferSlice, version: number, numKeyframes: 
     const index = view.getUint32(0x0C);
     const refNumber = view.getUint32(0x10);
 
-    const enum Flags {
+    enum Flags {
         STARTZ_CONSTANT = 1 << 29,
         ENDZ_CONSTANT   = 1 << 30,
         COLOR_CONSTANT  = 1 << 31,
     };
     const flags: Flags = view.getUint32(0x14);
 
-    const fogType: GX.FogType = view.getUint32(0x14);
-    const startZ = parseAnimationTrackF96OrConst(buffer.slice(0x18), !!(flags & Flags.STARTZ_CONSTANT));
-    const endZ = parseAnimationTrackF96OrConst(buffer.slice(0x1C), !!(flags & Flags.ENDZ_CONSTANT));
-    const color = parseAnimationTrackColor(buffer.slice(0x20), numKeyframes, !!(flags & Flags.COLOR_CONSTANT));
+    const fogType: GX.FogType = view.getUint32(0x18);
+    const startZ = parseAnimationTrackF96OrConst(buffer.slice(0x1C), !!(flags & Flags.STARTZ_CONSTANT));
+    const endZ = parseAnimationTrackF96OrConst(buffer.slice(0x20), !!(flags & Flags.ENDZ_CONSTANT));
+    const color = parseAnimationTrackColor(buffer.slice(0x24), numKeyframes, !!(flags & Flags.COLOR_CONSTANT));
 
     return { name, refNumber, fogType,
         startZ, endZ, color,
     };
 }
 
-export const enum SCN0_CameraType {
+export enum SCN0_CameraType {
     ROTATE, AIM,
 }
 
@@ -3001,7 +2612,7 @@ function parseSCN0_Camera(buffer: ArrayBufferSlice, version: number, numKeyframe
 
     const projType: GX.ProjectionType = view.getUint32(0x14);
 
-    const enum Flags {
+    enum Flags {
         POSX_CONSTANT        = 1 << 17,
         POSY_CONSTANT        = 1 << 18,
         POSZ_CONSTANT        = 1 << 19,
@@ -3054,7 +2665,7 @@ function parseSCN0(buffer: ArrayBufferSlice): SCN0 {
 
     assert(readString(buffer, 0x00, 0x04) === 'SCN0');
     const version = view.getUint32(0x08);
-    const supportedVersions = [0x05];
+    const supportedVersions = [0x04, 0x05];
     assert(supportedVersions.includes(version));
 
     const scnTopLevelResDicOffs = view.getUint32(0x10);
@@ -3063,7 +2674,8 @@ function parseSCN0(buffer: ArrayBufferSlice): SCN0 {
     let offs = 0x28;
 
     // user data
-    offs += 0x04;
+    if (version >= 0x05)
+        offs += 0x04;
 
     const nameOffs = view.getUint32(offs + 0x00);
     const name = readString(buffer, nameOffs);
@@ -3165,21 +2777,11 @@ export function parse(buffer: ArrayBufferSlice): RRES {
     const view = buffer.createDataView();
 
     assert(readString(buffer, 0x00, 0x04) === 'bres');
-
-    let littleEndian: boolean;
-    switch (view.getUint16(0x04, false)) {
-    case 0xFEFF:
-        littleEndian = false;
-        break;
-    case 0xFFFE:
-        littleEndian = true;
-        break;
-    default:
-        throw new Error("Invalid BOM");
-    }
-
+    const littleEndianMarker = view.getUint16(0x04);
+    assert(littleEndianMarker === 0xFEFF || littleEndianMarker === 0xFFFE);
+    const littleEndian = (littleEndianMarker === 0xFFFE);
     assert(!littleEndian);
-
+    const fileVersion = view.getUint16(0x06);
     const fileLength = view.getUint32(0x08);
     const rootSectionOffs = view.getUint16(0x0C);
     const numSections = view.getUint16(0x0E);
@@ -3316,22 +2918,71 @@ export function parse(buffer: ArrayBufferSlice): RRES {
     return { plt0, tex0, mdl0, srt0, pat0, clr0, chr0, vis0, scn0 };
 }
 
-const enum LightObjFlags {
+enum LightObjFlags {
+    NONE = 0,
     ENABLE = 1 << 0,
     HAS_COLOR = 1 << 1,
     HAS_ALPHA = 1 << 2,
     SPECULAR = 1 << 3,
 }
 
-export const enum LightObjSpace {
+export enum LightObjSpace {
     WORLD_SPACE,
     VIEW_SPACE,
 }
 
 export class LightObj {
-    public flags: LightObjFlags = 0;
+    public flags: LightObjFlags = LightObjFlags.NONE;
     public light = new GX_Material.Light();
     public space: LightObjSpace = LightObjSpace.WORLD_SPACE;
+
+    public isEnabled(): boolean {
+        return !!(this.flags & LightObjFlags.ENABLE);
+    }
+
+    public enable(): void {
+        this.flags |= LightObjFlags.ENABLE;
+    }
+
+    public disable(): void {
+        this.flags &= LightObjFlags.ENABLE;
+    }
+
+    public enableColor(): void {
+        this.flags |= LightObjFlags.HAS_COLOR;
+    }
+
+    public disableColor(): void {
+        this.flags &= LightObjFlags.HAS_COLOR;
+    }
+
+    public enableAlpha(): void {
+        this.flags |= LightObjFlags.HAS_ALPHA;
+    }
+
+    public disableAlpha(): void {
+        this.flags &= LightObjFlags.HAS_ALPHA;
+    }
+
+    public initLightColor(color: Color): void {
+        colorCopy(this.light.Color, color);
+    }
+
+    public initLightSpot(cutoffAngle: number, spotFunc: GX.SpotFunction): void {
+        GX_Material.lightSetSpot(this.light, cutoffAngle, spotFunc);
+    }
+
+    public initLightAttnA(k0: number, k1: number, k2: number): void {
+        vec3.set(this.light.CosAtten, k0, k1, k2);
+    }
+
+    public initLightDistAttn(refDist: number, refBrightness: number, distFunc: GX.DistAttnFunction): void {
+        GX_Material.lightSetDistAttn(this.light, refDist, refBrightness, distFunc);
+    }
+
+    public initLightAttnK(k0: number, k1: number, k2: number): void {
+        vec3.set(this.light.DistAtten, k0, k1, k2);
+    }
 }
 
 export class LightSet {
@@ -3340,16 +2991,18 @@ export class LightSet {
 
     public calcLights(m: GX_Material.Light[], lightSetting: LightSetting, viewMatrix: mat4): void {
         for (let i = 0; i < this.lightObjIndexes.length; i++) {
-            if (this.lightObjIndexes[i] < 0)
+            const lightObjIndex = this.lightObjIndexes[i];
+
+            if (lightObjIndex < 0)
                 continue;
 
-            const lightObj = lightSetting.lightObj[i];
+            const lightObj = lightSetting.lightObj[lightObjIndex];
             if (!!(lightObj.flags & LightObjFlags.ENABLE)) {
                 m[i].copy(lightObj.light);
 
                 if (lightObj.space === LightObjSpace.WORLD_SPACE) {
-                    GX_Material.lightSetWorldPositionViewMatrix(m[i], viewMatrix, lightObj.light.Position[0], lightObj.light.Position[1], lightObj.light.Position[2]);
-                    GX_Material.lightSetWorldDirectionNormalMatrix(lightObj.light, viewMatrix, lightObj.light.Direction[0], lightObj.light.Direction[1], lightObj.light.Direction[2]);
+                    GX_Material.lightSetWorldPosition(m[i], viewMatrix, lightObj.light.Position);
+                    GX_Material.lightSetWorldDirection(m[i], viewMatrix, lightObj.light.Direction);
                 } else if (lightObj.space === LightObjSpace.VIEW_SPACE) {
                     // Parameters are in view-space; already copied correctly.
                 }
@@ -3357,11 +3010,11 @@ export class LightSet {
         }
     }
 
-    public calcAmbColorMult(m: Color, lightSetting: LightSetting): void {
+    public calcAmbColorCopy(m: Color, lightSetting: LightSetting): void {
         if (this.ambLightObjIndex < 0)
             return;
 
-        colorMult(m, m, lightSetting.ambLightObj[this.ambLightObjIndex]);
+        colorCopy(m, lightSetting.ambLightObj[this.ambLightObjIndex]);
     }
 
     public calcLightSetLitMask(lightChannels: GX_Material.LightChannelControl[], lightSetting: LightSetting): boolean {
@@ -3373,10 +3026,12 @@ export class LightSet {
         let maska1 = 0;
 
         for (let i = 0; i < this.lightObjIndexes.length; i++) {
-            if (this.lightObjIndexes[i] < 0)
+            const lightObjIndex = this.lightObjIndexes[i];
+
+            if (lightObjIndex < 0)
                 continue;
 
-            const lightObj = lightSetting.lightObj[i];
+            const lightObj = lightSetting.lightObj[lightObjIndex];
             const bit = 1 << i;
             if (!!(lightObj.flags & LightObjFlags.ENABLE)) {
                 if (!(lightObj.flags & LightObjFlags.SPECULAR)) {
@@ -3398,18 +3053,15 @@ export class LightSet {
         const chan0 = assertExists(lightChannels[0]);
         let changed = false;
 
-        // TODO(jstpierre): This appear to be required for Olympic Games. But the light makes things worse...
-        /*
-        if (!chan0.colorChannel.lightingEnabled) {
+        if (!chan0.colorChannel.lightingEnabled && maskc0 !== 0) {
             chan0.colorChannel.lightingEnabled = true;
             changed = true;
         }
 
-        if (!chan0.alphaChannel.lightingEnabled) {
+        if (!chan0.alphaChannel.lightingEnabled && maska0 !== 0) {
             chan0.alphaChannel.lightingEnabled = true;
             changed = true;
         }
-        */
 
         if (chan0.colorChannel.lightingEnabled && chan0.colorChannel.litMask !== maskc0) {
             chan0.colorChannel.litMask = maskc0;
@@ -3451,13 +3103,62 @@ export class LightSetting {
 }
 
 export class SCN0Animator {
-    constructor(private animationController: AnimationController, private scn0: SCN0) {
+    private scratchPos = vec3.create();
+    private scratchAim = vec3.create();
+
+    constructor(private animationController: AnimationController, public scn0: SCN0) {
+    }
+
+    public calcCameraPositionAim(camera: Camera, cameraIndex: number): void {
+        const animFrame = getAnimFrame(this.scn0, this.animationController.getTimeInFrames());
+        const scn0Cam = this.scn0.cameras[cameraIndex];
+
+        const posX = sampleFloatAnimationTrack(scn0Cam.posX, animFrame);
+        const posY = sampleFloatAnimationTrack(scn0Cam.posY, animFrame);
+        const posZ = sampleFloatAnimationTrack(scn0Cam.posZ, animFrame);
+        vec3.set(this.scratchPos, posX, posY, posZ);
+
+        if (scn0Cam.cameraType === SCN0_CameraType.AIM) {
+            const aimX = sampleFloatAnimationTrack(scn0Cam.aimX, animFrame);
+            const aimY = sampleFloatAnimationTrack(scn0Cam.aimY, animFrame);
+            const aimZ = sampleFloatAnimationTrack(scn0Cam.aimZ, animFrame);
+            vec3.set(this.scratchAim, aimX, aimY, aimZ);
+
+            mat4.targetTo(camera.worldMatrix, this.scratchPos, this.scratchAim, Vec3UnitY);
+
+            // TODO(jstpierre): What units is twist in?
+            // const twist = sampleFloatAnimationTrack(scn0Cam.twist, animFrame);
+            // mat4.rotateZ(camera.viewMatrix, camera.viewMatrix, twist);
+
+            camera.worldMatrixUpdated();
+        } else {
+            // TODO(jstpierre): Support rotation.
+            assert(false);
+        }
+
+        camera.worldMatrixUpdated();
+    }
+
+    public calcCameraProjection(camera: Camera, cameraIndex: number): void {
+        const animFrame = getAnimFrame(this.scn0, this.animationController.getTimeInFrames());
+        const scn0Cam = this.scn0.cameras[cameraIndex];
+
+        if (scn0Cam.projType === GX.ProjectionType.PERSPECTIVE) {
+            const perspFovy = sampleFloatAnimationTrack(scn0Cam.perspFovy, animFrame);
+            const fovY = MathConstants.DEG_TO_RAD * perspFovy;
+            const aspect = sampleFloatAnimationTrack(scn0Cam.aspect, animFrame);
+            const near = sampleFloatAnimationTrack(scn0Cam.near, animFrame);
+            const far = sampleFloatAnimationTrack(scn0Cam.far, animFrame);
+            camera.setPerspective(fovY, aspect, near, far);
+        } else {
+            // TODO(jstpierre): Orthographic.
+        }
     }
 
     public calcCameraClipPlanes(camera: Camera, cameraIndex: number): void {
         const animFrame = getAnimFrame(this.scn0, this.animationController.getTimeInFrames());
-
         const scn0Cam = this.scn0.cameras[cameraIndex];
+
         const near = sampleFloatAnimationTrack(scn0Cam.near, animFrame);
         const far = sampleFloatAnimationTrack(scn0Cam.far, animFrame);
 
@@ -3497,21 +3198,40 @@ export class SCN0Animator {
                 if (entry.hasAlpha)
                     dst.flags |= LightObjFlags.HAS_ALPHA;
 
-                if (entry.lightType === SCN0_LightType.DIRECTIONAL) {
-                    colorFromRGBA8(dst.light.Color, sampleAnimationTrackColor(entry.color, animFrame));
+                colorFromRGBA8(dst.light.Color, sampleAnimationTrackColor(entry.color, animFrame));
 
-                    const posX = sampleFloatAnimationTrack(entry.posX, animFrame);
-                    const posY = sampleFloatAnimationTrack(entry.posY, animFrame);
-                    const posZ = sampleFloatAnimationTrack(entry.posZ, animFrame);
+                const posX = sampleFloatAnimationTrack(entry.posX, animFrame);
+                const posY = sampleFloatAnimationTrack(entry.posY, animFrame);
+                const posZ = sampleFloatAnimationTrack(entry.posZ, animFrame);
+
+                if (entry.lightType === SCN0_LightType.DIRECTIONAL) {
                     const aimX = sampleFloatAnimationTrack(entry.aimX, animFrame);
                     const aimY = sampleFloatAnimationTrack(entry.aimY, animFrame);
                     const aimZ = sampleFloatAnimationTrack(entry.aimZ, animFrame);
-
                     // This is in world-space. When copying it to the material params, we'll multiply by the view matrix.
                     vec3.set(dst.light.Position, (aimX - posX) * -1e10, (aimY - posY) * -1e10, (aimZ - posZ) * -1e10);
-                    vec3.set(dst.light.Direction, 0, 0, 0);
+                    vec3.zero(dst.light.Direction);
                     vec3.set(dst.light.DistAtten, 1, 0, 0);
                     vec3.set(dst.light.CosAtten, 1, 0, 0);
+                } else if (entry.lightType === SCN0_LightType.POINT) {
+                    vec3.set(dst.light.Position, posX, posY, posZ);
+                    GX_Material.lightSetSpot(dst.light, 0.0, GX.SpotFunction.OFF);
+                    const refDistance = sampleFloatAnimationTrack(entry.refDistance, animFrame);
+                    const refBrightness = sampleFloatAnimationTrack(entry.refBrightness, animFrame);
+                    GX_Material.lightSetDistAttn(dst.light, refDistance, refBrightness, entry.distFunc);
+                    vec3.zero(dst.light.Direction);
+                } else if (entry.lightType === SCN0_LightType.SPOT) {
+                    vec3.set(dst.light.Position, posX, posY, posZ);
+                    const cutoff = sampleFloatAnimationTrack(entry.cutoff, animFrame);
+                    GX_Material.lightSetSpot(dst.light, cutoff, entry.spotFunc);
+                    const refDistance = sampleFloatAnimationTrack(entry.refDistance, animFrame);
+                    const refBrightness = sampleFloatAnimationTrack(entry.refBrightness, animFrame);
+                    GX_Material.lightSetDistAttn(dst.light, refDistance, refBrightness, entry.distFunc);
+                    const aimX = sampleFloatAnimationTrack(entry.aimX, animFrame);
+                    const aimY = sampleFloatAnimationTrack(entry.aimY, animFrame);
+                    const aimZ = sampleFloatAnimationTrack(entry.aimZ, animFrame);
+                    vec3.set(dst.light.Direction, aimX - posX, aimY - posY, aimZ - posZ);
+                    vec3.normalize(dst.light.Direction, dst.light.Direction);
                 }
 
                 // TODO(jstpierre): Specular.

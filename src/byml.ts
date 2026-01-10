@@ -1,28 +1,30 @@
 
-import ArrayBufferSlice, { ArrayBuffer_slice } from "./ArrayBufferSlice";
-import { assert, readString, align, getTextDecoder } from "./util";
-import { Endianness } from "./endian";
+import ArrayBufferSlice from "./ArrayBufferSlice.js";
+import { assert, readString, align } from "./util.js";
+import { Endianness } from "./endian.js";
 
-export const enum FileType {
+export enum FileType {
     BYML,
     CRG1, // Jasper's BYML variant with extensions.
 }
 
-const enum NodeType {
-    STRING       = 0xA0,
-    ARRAY        = 0xC0,
-    DICT         = 0xC1,
-    STRING_TABLE = 0xC2,
-    BINARY_DATA  = 0xCB, // CRG1 extension.
-    BOOL         = 0xD0,
-    INT          = 0xD1,
-    FLOAT        = 0xD2,
-    UINT         = 0xD3,
-    INT64        = 0xE4,
-    UINT64       = 0xE5,
-    FLOAT64      = 0xE6,
-    FLOAT_ARRAY  = 0xE2, // CRG1 extension.
-    NULL         = 0xFF,
+enum NodeType {
+    String       = 0xA0,
+    Path         = 0xA1,
+    Array        = 0xC0,
+    Dictionary   = 0xC1,
+    StringTable  = 0xC2,
+    PathTable    = 0xC3,
+    BinaryData   = 0xCB, // CRG1 extension.
+    Bool         = 0xD0,
+    Int          = 0xD1,
+    Float        = 0xD2,
+    UInt         = 0xD3,
+    Int64        = 0xE4,
+    UInt64       = 0xE5,
+    Float64      = 0xE6,
+    FloatArray   = 0xE2, // CRG1 extension.
+    Null         = 0xFF,
 }
 
 interface FileDescription {
@@ -32,52 +34,44 @@ interface FileDescription {
 
 const fileDescriptions: { [key: number]: FileDescription } = {
     [FileType.BYML]: {
-        magics: ['BY\0\x01', 'BY\0\x02', 'YB\x03\0'],
-        allowedNodeTypes: [ NodeType.STRING, NodeType.ARRAY, NodeType.DICT, NodeType.STRING_TABLE, NodeType.BOOL, NodeType.INT, NodeType.UINT, NodeType.FLOAT, NodeType.NULL ],
+        magics: ['BY\0\x01', 'BY\0\x02', 'YB\x03\0', 'YB\x01\0'],
+        allowedNodeTypes: [ NodeType.String, NodeType.Path, NodeType.Array, NodeType.Dictionary, NodeType.StringTable, NodeType.PathTable, NodeType.Bool, NodeType.Int, NodeType.UInt, NodeType.Float, NodeType.Null ],
     },
     [FileType.CRG1]: {
         magics: ['CRG1'],
-        allowedNodeTypes: [ NodeType.STRING, NodeType.ARRAY, NodeType.DICT, NodeType.STRING_TABLE, NodeType.BOOL, NodeType.INT, NodeType.UINT, NodeType.FLOAT, NodeType.NULL, NodeType.FLOAT_ARRAY, NodeType.BINARY_DATA ],
+        allowedNodeTypes: [ NodeType.String, NodeType.Path, NodeType.Array, NodeType.Dictionary, NodeType.StringTable, NodeType.PathTable, NodeType.Bool, NodeType.Int, NodeType.UInt, NodeType.Float, NodeType.Null, NodeType.FloatArray, NodeType.BinaryData ],
     },
 }
 
-function decodeUTF8(buffer: Uint8Array): string {
-    if (typeof TextDecoder !== 'undefined') {
-        return getTextDecoder('utf8')!.decode(buffer);
-    // @ts-ignore
-    } else if (typeof require !== 'undefined') {
-        // @ts-ignore
-        const { StringDecoder } = require('string_decoder');
-        return new StringDecoder('utf8').write(buffer);
-    } else {
-        throw "whoops";
-    }
-}
-
 function readStringUTF8(buffer: ArrayBufferSlice, offs: number): string {
-    const buf = buffer.createTypedArray(Uint8Array, offs);
-    let i = 0;
-    while (true) {
-        if (buf[i] === 0)
-            break;
-        i++;
-    }
-    return decodeUTF8(buffer.createTypedArray(Uint8Array, offs, i));
+    return readString(buffer, offs, -1, true, 'utf8');
 }
 
 export type StringTable = string[];
-export type ComplexNode = NodeDict | NodeArray | StringTable | ArrayBufferSlice | Float32Array;
-export type SimpleNode = number | string | boolean | null;
+export type ComplexNode = NodeDict | NodeArray | NodePath | PathTable | StringTable | ArrayBufferSlice | Float32Array;
+export type SimpleNode = number | bigint | string | boolean | null;
 export type Node = ComplexNode | SimpleNode;
 
 export interface NodeDict { [key: string]: Node; }
-export interface NodeArray extends Array<Node> {}
+export type NodeArray = Node[];
+export interface NodePathPoint {
+    px: number;
+    py: number;
+    pz: number;
+    nx: number;
+    ny: number;
+    nz: number;
+    arg: number;
+}
+export type NodePath = NodePathPoint[];
+export type PathTable = NodePath[];
 
 class ParseContext {
     constructor(public fileType: FileType, public endianness: Endianness) {}
     public get littleEndian() { return this.endianness === Endianness.LITTLE_ENDIAN; }
     public strKeyTable: StringTable | null = null;
     public strValueTable: StringTable | null = null;
+    public pathTable: PathTable | null = null;
 }
 
 function getUint24(view: DataView, offs: number, littleEndian: boolean) {
@@ -94,7 +88,7 @@ function parseStringTable(context: ParseContext, buffer: ArrayBufferSlice, offs:
     const view = buffer.createDataView();
     const nodeType: NodeType = view.getUint8(offs + 0x00);
     const numValues = getUint24(view, offs + 0x01, context.littleEndian);
-    assert(nodeType === NodeType.STRING_TABLE);
+    assert(nodeType === NodeType.StringTable);
 
     let stringTableIdx: number = offs + 0x04;
     const strings: StringTable = [];
@@ -110,7 +104,7 @@ function parseDict(context: ParseContext, buffer: ArrayBufferSlice, offs: number
     const view = buffer.createDataView();
     const nodeType: NodeType = view.getUint8(offs + 0x00);
     const numValues = getUint24(view, offs + 0x01, context.littleEndian);
-    assert(nodeType === NodeType.DICT);
+    assert(nodeType === NodeType.Dictionary);
 
     const result: NodeDict = {};
     let dictIdx = offs + 0x04;
@@ -129,7 +123,7 @@ function parseArray(context: ParseContext, buffer: ArrayBufferSlice, offs: numbe
     const view = buffer.createDataView();
     const nodeType: NodeType = view.getUint8(offs + 0x00);
     const numValues = getUint24(view, offs + 0x01, context.littleEndian);
-    assert(nodeType === NodeType.ARRAY);
+    assert(nodeType === NodeType.Array);
 
     const result: NodeArray = [];
     let entryTypeIdx = offs + 0x04;
@@ -143,6 +137,33 @@ function parseArray(context: ParseContext, buffer: ArrayBufferSlice, offs: numbe
     return result;
 }
 
+function parsePathTable(context: ParseContext, buffer: ArrayBufferSlice, offs: number): PathTable {
+    const view = buffer.createDataView();
+    const nodeType: NodeType = view.getUint8(offs + 0x00);
+    const numPaths = getUint24(view, offs + 0x01, context.littleEndian);
+    assert(nodeType === NodeType.PathTable);
+
+    const pathTable: NodePath[] = [];
+    for (let i = 0; i < numPaths; i++) {
+        const startOffs = offs + view.getUint32(offs + 0x04 + 0x04 * (i + 0), context.littleEndian);
+        const endOffs = offs + view.getUint32(offs + 0x04 + 0x04 * (i + 1), context.littleEndian);
+
+        const path: NodePath = [];
+        for (let j = startOffs; j < endOffs; j += 0x1C) {
+            const px = view.getFloat32(j + 0x00, context.littleEndian);
+            const py = view.getFloat32(j + 0x04, context.littleEndian);
+            const pz = view.getFloat32(j + 0x08, context.littleEndian);
+            const nx = view.getFloat32(j + 0x0C, context.littleEndian);
+            const ny = view.getFloat32(j + 0x10, context.littleEndian);
+            const nz = view.getFloat32(j + 0x14, context.littleEndian);
+            const arg = view.getFloat32(j + 0x18, context.littleEndian);
+            path.push({ px, py, pz, nx, ny, nz, arg });
+        }
+        pathTable.push(path);
+    }
+    return pathTable;
+}
+
 function parseComplexNode(context: ParseContext, buffer: ArrayBufferSlice, offs: number, expectedNodeType?: NodeType): ComplexNode {
     const view = buffer.createDataView();
     const nodeType: NodeType = view.getUint8(offs + 0x00);
@@ -150,20 +171,22 @@ function parseComplexNode(context: ParseContext, buffer: ArrayBufferSlice, offs:
     if (expectedNodeType !== undefined)
         assert(expectedNodeType === nodeType);
     switch(nodeType) {
-    case NodeType.DICT:
+    case NodeType.Dictionary:
         return parseDict(context, buffer, offs);
-    case NodeType.ARRAY:
+    case NodeType.Array:
         return parseArray(context, buffer, offs);
-    case NodeType.STRING_TABLE:
+    case NodeType.StringTable:
         return parseStringTable(context, buffer, offs);
-    case NodeType.BINARY_DATA:
-        if (numValues == 0x00FFFFFF) {
+    case NodeType.PathTable:
+        return parsePathTable(context, buffer, offs);
+    case NodeType.BinaryData:
+        if (numValues === 0x00FFFFFF) {
             const numValues2 = view.getUint32(offs + 0x04, context.littleEndian);
             return buffer.subarray(offs + 0x08, numValues + numValues2);
         } else {
             return buffer.subarray(offs + 0x04, numValues);
         }
-    case NodeType.FLOAT_ARRAY:
+    case NodeType.FloatArray:
         return buffer.createTypedArray(Float32Array, offs + 0x04, numValues, context.endianness);
     default:
         throw new Error("whoops");
@@ -179,95 +202,104 @@ function parseNode(context: ParseContext, buffer: ArrayBufferSlice, nodeType: No
     validateNodeType(context, nodeType);
 
     switch (nodeType) {
-    case NodeType.ARRAY:
-    case NodeType.DICT:
-    case NodeType.STRING_TABLE:
-    case NodeType.BINARY_DATA:
-    case NodeType.FLOAT_ARRAY: {
+    case NodeType.Array:
+    case NodeType.Dictionary:
+    case NodeType.StringTable:
+    case NodeType.PathTable:
+    case NodeType.BinaryData:
+    case NodeType.FloatArray: {
         const complexOffs = view.getUint32(offs, context.littleEndian);
         return parseComplexNode(context, buffer, complexOffs, nodeType);
     }
-    case NodeType.STRING: {
+    case NodeType.String: {
         const idx = view.getUint32(offs, context.littleEndian);
         return context.strValueTable![idx];
     }
-    case NodeType.BOOL: {
+    case NodeType.Path: {
+        const idx = view.getUint32(offs, context.littleEndian);
+        return context.pathTable![idx];
+    }
+    case NodeType.Bool: {
         const value = view.getUint32(offs, context.littleEndian);
         assert(value === 0 || value === 1);
         return !!value;
     }
-    case NodeType.INT:
+    case NodeType.Int:
         return view.getInt32(offs, context.littleEndian);
-    case NodeType.UINT:
+    case NodeType.UInt:
         return view.getUint32(offs, context.littleEndian);
-    case NodeType.FLOAT:
+    case NodeType.Float:
         return view.getFloat32(offs, context.littleEndian);
-    // TODO(jstpierre): we need a BigInt?
-    case NodeType.INT64:
-        return view.getInt32(offs, context.littleEndian);
-    case NodeType.UINT64:
-        return view.getUint32(offs, context.littleEndian);
-    case NodeType.FLOAT64:
+    case NodeType.Int64:
+        return view.getBigInt64(offs, context.littleEndian);
+    case NodeType.UInt64:
+        return view.getBigUint64(offs, context.littleEndian);
+    case NodeType.Float64:
         return view.getFloat64(offs, context.littleEndian);
-    case NodeType.NULL:
+    case NodeType.Null:
         return null;
     default:
         throw new Error();
     }
 }
 
-export function parse<T>(buffer: ArrayBufferSlice, fileType: FileType = FileType.BYML): T {
+export interface ParseOptions {
+    hasPathTable: boolean;
+}
+
+export function parse<T>(buffer: ArrayBufferSlice, fileType: FileType = FileType.BYML, opt?: ParseOptions): T {
     const magic = readString(buffer, 0x00, 0x04, false);
     const magics = fileDescriptions[fileType].magics;
     assert(magics.includes(magic));
     const view = buffer.createDataView();
 
-    const littleEndian = magic.slice(0, 2) == 'YB';
+    const littleEndian = magic.slice(0, 2) === 'YB';
     const endianness: Endianness = littleEndian ? Endianness.LITTLE_ENDIAN : Endianness.BIG_ENDIAN;
     const context: ParseContext = new ParseContext(fileType, endianness);
 
     const strKeyTableOffs = view.getUint32(0x04, context.littleEndian);
     const strValueTableOffs = view.getUint32(0x08, context.littleEndian);
-    const rootNodeOffs = view.getUint32(0x0C, context.littleEndian);
+    let headerOffs = 0x0C;
+    let pathTableOffs: number = 0;
+    if (opt && opt.hasPathTable) {
+        pathTableOffs = view.getUint32(headerOffs + 0x00, context.littleEndian);
+        headerOffs += 0x04;
+    }
+    const rootNodeOffs = view.getUint32(headerOffs + 0x00, context.littleEndian);
 
     if (rootNodeOffs === 0)
         return {} as T;
 
     context.strKeyTable = strKeyTableOffs !== 0 ? parseStringTable(context, buffer, strKeyTableOffs) : null;
     context.strValueTable = strValueTableOffs !== 0 ? parseStringTable(context, buffer, strValueTableOffs) : null;
+    context.pathTable = pathTableOffs !== 0 ? parsePathTable(context, buffer, pathTableOffs) : null;
     const node = parseComplexNode(context, buffer, rootNodeOffs);
     return node as any as T;
 }
 
 class GrowableBuffer {
-    public buffer: ArrayBuffer;
-    public view: DataView;
+    public buffer = new ArrayBuffer();
+    public view = new DataView(this.buffer);
     public userSize: number = 0;
     public bufferSize: number = 0;
 
     constructor(initialSize: number = 0x10000, public growAmount: number = 0x1000) {
-        this.maybeGrow(initialSize);
+        this.maybeGrow(0, initialSize);
     }
 
-    public maybeGrow(newSize: number): void {
-        if (newSize > this.userSize)
-            this.userSize = newSize;
+    public maybeGrow(newUserSize: number, newBufferSize: number = newUserSize): void {
+        if (newUserSize > this.userSize)
+            this.userSize = newUserSize;
 
-        if (newSize > this.bufferSize) {
-            this.bufferSize = align(newSize, this.growAmount);
-            const newBuffer = new ArrayBuffer(this.bufferSize);
-            // memcpy
-            new Uint8Array(newBuffer).set(new Uint8Array(this.buffer));
-            this.buffer = newBuffer;
+        if (newBufferSize > this.bufferSize) {
+            this.bufferSize = align(newBufferSize, this.growAmount);
+            this.buffer = this.buffer.transfer(this.bufferSize);
             this.view = new DataView(this.buffer);
         }
     }
 
     public finalize(): ArrayBuffer {
-        const buffer = this.buffer;
-        // Clear out to avoid GC.
-        (this as any).buffer = null;
-        return ArrayBuffer_slice.call(buffer, 0x00, this.userSize);
+        return this.buffer.transfer(this.userSize);
     }
 }
 
@@ -283,7 +315,7 @@ function setUint24(view: DataView, offs: number, v: number, littleEndian: boolea
     }
 }
 
-class WritableStream {
+export class WritableStream {
     constructor(public buffer: GrowableBuffer = new GrowableBuffer(), public offs: number = 0) {
     }
 
@@ -307,6 +339,12 @@ class WritableStream {
     public writeString(v: string): void {
         this.setString(this.offs, v);
         this.offs += v.length;
+    }
+
+    public writeFixedString(v: string, s: number): void {
+        assert(v.length < s);
+        this.setString(this.offs, v);
+        this.offs += s;
     }
 
     public setUint8(offs: number, v: number): void {
@@ -393,26 +431,26 @@ function writeHeader(w: WriteContext, nodeType: NodeType, numEntries: number): v
 
 function classifyNodeValue(w: WriteContext, v: Node): NodeType {
     if (v === undefined || v === null) {
-        return NodeType.NULL;
+        return NodeType.Null;
     } if (typeof v === 'boolean') {
-        return NodeType.BOOL;
+        return NodeType.Bool;
     } else if (typeof v === 'string') {
-        return NodeType.STRING;
+        return NodeType.String;
     } else if (typeof v === 'number') {
         if ((v >>> 0) === v)
-            return NodeType.UINT;
+            return NodeType.UInt;
         else if ((v | 0) === v)
-            return NodeType.INT;
+            return NodeType.Int;
         else
-            return NodeType.FLOAT;
-    } else if (w.canUseNodeType(NodeType.FLOAT_ARRAY) && v instanceof Float32Array) {
-        return NodeType.FLOAT_ARRAY;
-    } else if (w.canUseNodeType(NodeType.BINARY_DATA) && v instanceof ArrayBufferSlice) {
-        return NodeType.BINARY_DATA;
+            return NodeType.Float;
+    } else if (w.canUseNodeType(NodeType.FloatArray) && v instanceof Float32Array) {
+        return NodeType.FloatArray;
+    } else if (w.canUseNodeType(NodeType.BinaryData) && v instanceof ArrayBufferSlice) {
+        return NodeType.BinaryData;
     } else if (v instanceof Array) {
-        return NodeType.ARRAY;
+        return NodeType.Array;
     } else if (v.constructor === Object) {
-        return NodeType.DICT;
+        return NodeType.Dictionary;
     } else {
         throw "whoops";
     }
@@ -422,7 +460,7 @@ function writeComplexValueArray(w: WriteContext, v: NodeArray): void {
     const stream = w.stream;
 
     const numEntries = v.length;
-    writeHeader(w, NodeType.ARRAY, numEntries);
+    writeHeader(w, NodeType.Array, numEntries);
     // First up is child value types.
     for (let i = 0; i < v.length; i++)
         stream.writeUint8(classifyNodeValue(w, v[i]));
@@ -444,7 +482,7 @@ function writeComplexValueDict(w: WriteContext, v: NodeDict): void {
     const keys = Object.keys(v);
     const numEntries = keys.length;
 
-    writeHeader(w, NodeType.DICT, numEntries);
+    writeHeader(w, NodeType.Dictionary, numEntries);
     // Write our children values, then go back and write our header.
     // Each header item is 0x08 bytes.
     let headerIdx = stream.offs;
@@ -467,7 +505,7 @@ function writeComplexValueDict(w: WriteContext, v: NodeDict): void {
 
 function writeComplexValueFloatArray(w: WriteContext, v: Float32Array): void {
     const stream = w.stream;
-    writeHeader(w, NodeType.FLOAT64, v.length);
+    writeHeader(w, NodeType.Float64, v.length);
     for (let i = 0; i < v.length; i++)
         stream.writeFloat32(v[i], w.littleEndian);
 }
@@ -475,12 +513,12 @@ function writeComplexValueFloatArray(w: WriteContext, v: Float32Array): void {
 function writeComplexValueBinary(w: WriteContext, v: ArrayBufferSlice): void {
     const stream = w.stream;
     if (v.byteLength >= 0x00FFFFFF) {
-        writeHeader(w, NodeType.BINARY_DATA, 0x00FFFFFF);
+        writeHeader(w, NodeType.BinaryData, 0x00FFFFFF);
         const numValues2 = v.byteLength - 0x00FFFFFF;
         assert(numValues2 <= 0xFFFFFFFF);
         stream.writeUint32(numValues2, w.littleEndian);
     } else {
-        writeHeader(w, NodeType.BINARY_DATA, v.byteLength);
+        writeHeader(w, NodeType.BinaryData, v.byteLength);
     }
     stream.writeBufferSlice(v);
     stream.align(0x04);
@@ -496,16 +534,16 @@ function writeValue(w: WriteContext, nodeType: NodeType, v: Node, valueOffs: num
     } else if (typeof v === 'string') {
         stream.setUint32(valueOffs, strTableIndex(w.strValueTable, v), w.littleEndian);
     } else if (typeof v === 'number') {
-        if (nodeType === NodeType.FLOAT)
+        if (nodeType === NodeType.Float)
             stream.setFloat32(valueOffs, v, w.littleEndian);
-        else if (nodeType === NodeType.UINT)
+        else if (nodeType === NodeType.UInt)
             stream.setUint32(valueOffs, v, w.littleEndian);
         else
             stream.setInt32(valueOffs, v, w.littleEndian);
-    } else if (w.canUseNodeType(NodeType.FLOAT_ARRAY) && v instanceof Float32Array) {
+    } else if (w.canUseNodeType(NodeType.FloatArray) && v instanceof Float32Array) {
         stream.setUint32(valueOffs, stream.offs, w.littleEndian);
         writeComplexValueFloatArray(w, v);
-    } else if (w.canUseNodeType(NodeType.BINARY_DATA) && v instanceof ArrayBufferSlice) {
+    } else if (w.canUseNodeType(NodeType.BinaryData) && v instanceof ArrayBufferSlice) {
         stream.setUint32(valueOffs, stream.offs, w.littleEndian);
         writeComplexValueBinary(w, v);
     } else if (v instanceof Array) {
@@ -520,14 +558,14 @@ function writeValue(w: WriteContext, nodeType: NodeType, v: Node, valueOffs: num
 }
 
 function gatherStrings(v: Node, keyStrings: Set<string>, valueStrings: Set<string>): void {
-    if (v === undefined || v === null || typeof v === 'number' || typeof v === 'boolean' || v instanceof Float32Array || v instanceof ArrayBufferSlice) {
+    if (v === undefined || v === null || typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean' || v instanceof Float32Array || v instanceof ArrayBufferSlice) {
         // Nothing.
         return;
     } else if (typeof v === 'string') {
         valueStrings.add(v);
     } else if (v instanceof Array) {
         for (let i = 0; i < v.length; i++)
-            gatherStrings(v[i], keyStrings, valueStrings);
+            gatherStrings(v[i] as Node, keyStrings, valueStrings);
     } else if (v.constructor === Object) {
         // Generic object.
         const keys = Object.keys(v);
@@ -541,9 +579,9 @@ function gatherStrings(v: Node, keyStrings: Set<string>, valueStrings: Set<strin
 }
 
 function bymlStrCompare(a: string, b: string): number {
-    if (a == '')
+    if (a === '')
         return 1;
-    else if (b == '')
+    else if (b === '')
         return -1;
     else
         return a.localeCompare(b);
@@ -555,7 +593,7 @@ function writeStringTable(w: WriteContext, v: StringTable): void {
     // A string table contains at least one entry, so this field is the number of entries minus one.
     const numEntries = v.length - 1;
 
-    writeHeader(w, NodeType.STRING_TABLE, numEntries);
+    writeHeader(w, NodeType.StringTable, numEntries);
 
     // Strings should already be sorted.
     let strDataIdx = 0x04 // Header
@@ -582,7 +620,7 @@ export function write<T extends {}>(v: T, fileType: FileType = FileType.CRG1, ma
         magic = magics[magics.length - 1];
     assert(magic.length === 0x04);
 
-    const littleEndian = magic.slice(0, 2) == 'YB';
+    const littleEndian = magic.slice(0, 2) === 'YB';
     const endianness: Endianness = littleEndian ? Endianness.LITTLE_ENDIAN : Endianness.BIG_ENDIAN;
 
     const keyStringSet = new Set<string>(['']);

@@ -1,32 +1,27 @@
 
-import { mat4, mat2d } from "gl-matrix";
-import { GfxFormat, GfxDevice, GfxProgram, GfxBufferUsage, GfxBufferFrequencyHint, GfxBindingLayoutDescriptor, GfxHostAccessPass, GfxTexture, GfxBlendMode, GfxBlendFactor, GfxMipFilterMode, GfxTexFilterMode, GfxSampler, GfxRenderPass, GfxTextureDimension, GfxMegaStateDescriptor } from '../gfx/platform/GfxPlatform';
-import * as Viewer from '../viewer';
-import * as NSBMD from './nsbmd';
-import * as NSBTA from "./nsbta";
-import * as NSBTP from "./nsbtp";
-import * as NITRO_GX from '../sm64ds/nitro_gx';
-import { readTexture, getFormatName, Texture, parseTexImageParamWrapModeS, parseTexImageParamWrapModeT, textureFormatIsTranslucent } from "../sm64ds/nitro_tex";
-import { NITRO_Program, VertexData } from '../sm64ds/render';
-import { GfxRendererLayer, makeSortKeyOpaque } from "../gfx/render/GfxRenderer";
-import { TEX0, TEX0Texture } from "./nsbtx";
-import { TextureMapping } from "../TextureHolder";
-import { fillMatrix4x3, fillMatrix4x4, fillMatrix3x2, fillVec4 } from "../gfx/helpers/UniformBufferHelpers";
-import { computeViewMatrix, computeViewMatrixSkybox, computeModelMatrixYBillboard } from "../Camera";
-import AnimationController from "../AnimationController";
-import { nArray } from "../util";
-import { GfxRenderInstManager, GfxRenderInst } from "../gfx/render/GfxRenderer2";
+import { mat2d, mat4 } from "gl-matrix";
+import AnimationController from "../AnimationController.js";
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { computeViewMatrix, computeViewMatrixSkybox } from "../Camera.js";
+import { White, colorNewCopy } from "../Color.js";
+import { AABB } from "../Geometry.js";
+import { CalcBillboardFlags, calcBillboardMatrix } from "../MathHelpers.js";
+import * as NITRO_GX from '../SuperMario64DS/nitro_gx.js';
+import { Texture, getFormatName, parseTexImageParamWrapModeS, parseTexImageParamWrapModeT, readTexture, textureFormatIsTranslucent } from "../SuperMario64DS/nitro_tex.js";
+import { NITRO_Program, VertexData } from '../SuperMario64DS/render.js';
+import { TextureMapping } from "../TextureHolder.js";
+import { setAttachmentStateSimple } from "../gfx/helpers/GfxMegaStateDescriptorHelpers.js";
+import { convertToCanvas } from "../gfx/helpers/TextureConversionHelpers.js";
+import { fillColor, fillMatrix3x2, fillMatrix4x3 } from "../gfx/helpers/UniformBufferHelpers.js";
+import { GfxBindingLayoutDescriptor, GfxBlendFactor, GfxBlendMode, GfxDevice, GfxFormat, GfxMegaStateDescriptor, GfxMipFilterMode, GfxProgram, GfxSampler, GfxTexFilterMode, GfxTexture, makeTextureDescriptor2D } from '../gfx/platform/GfxPlatform.js';
+import { GfxRenderCache } from "../gfx/render/GfxRenderCache.js";
+import { GfxRenderInst, GfxRenderInstManager, GfxRendererLayer, makeSortKeyOpaque } from "../gfx/render/GfxRenderInstManager.js";
+import { assertExists, nArray } from "../util.js";
+import * as Viewer from '../viewer.js';
+import { MDL0Material, MDL0Model, MDL0Node, MDL0Shape, PAT0, PAT0TexAnimator, SRT0, SRT0TexMtxAnimator, TEX0, TEX0Texture, bindPAT0, bindSRT0 } from "./NNS_G3D.js";
 
 function textureToCanvas(bmdTex: TEX0Texture, pixels: Uint8Array, name: string): Viewer.Texture {
-    const canvas = document.createElement("canvas");
-    canvas.width = bmdTex.width;
-    canvas.height = bmdTex.height;
-    canvas.title = name;
-
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.createImageData(canvas.width, canvas.height);
-    imgData.data.set(pixels);
-    ctx.putImageData(imgData, 0, 0);
+    const canvas = convertToCanvas(ArrayBufferSlice.fromView(pixels), bmdTex.width, bmdTex.height);
     const surfaces = [ canvas ];
     const extraInfo = new Map<string, string>();
     extraInfo.set('Format', getFormatName(bmdTex.format));
@@ -35,28 +30,33 @@ function textureToCanvas(bmdTex: TEX0Texture, pixels: Uint8Array, name: string):
 
 const scratchTexMatrix = mat2d.create();
 class MaterialInstance {
-    private texture: TEX0Texture;
-    private gfxTextures: GfxTexture[] = [];
     private textureNames: string[] = [];
+    private gfxTextures: GfxTexture[] = [];
     private gfxSampler: GfxSampler | null = null;
     private textureMappings: TextureMapping[] = nArray(1, () => new TextureMapping());
     public viewerTextures: Viewer.Texture[] = [];
     public baseCtx: NITRO_GX.Context;
-    public srt0Animator: NSBTA.SRT0TexMtxAnimator | null = null;
-    public pat0Animator: NSBTP.PAT0TexAnimator | null = null;
+    public srt0Animator: SRT0TexMtxAnimator | null = null;
+    public pat0Animator: PAT0TexAnimator | null = null;
+    public lightMask = 0x0F;
+    public diffuseColor = colorNewCopy(White);
+    public ambientColor = colorNewCopy(White);
+    public specularColor = colorNewCopy(White);
+    public emissionColor = colorNewCopy(White);
     private sortKey: number;
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
+    public visible = true;
 
-    constructor(device: GfxDevice, tex0: TEX0, private model: NSBMD.MDL0Model, public material: NSBMD.MDL0Material) {
-        this.texture = tex0.textures.find((t) => t.name === this.material.textureName);
-        this.translateTexture(device, tex0, this.material.textureName, this.material.paletteName);
-        this.baseCtx = { color: { r: 0xFF, g: 0xFF, b: 0xFF }, alpha: this.material.alpha };
+    constructor(cache: GfxRenderCache, tex0: TEX0, private model: MDL0Model, public material: MDL0Material) {
+        this.baseCtx = { color: White, alpha: this.material.alpha };
 
-        if (this.gfxTextures.length > 0) {
-            this.gfxSampler = device.createSampler({
-                minFilter: GfxTexFilterMode.POINT,
-                magFilter: GfxTexFilterMode.POINT,
-                mipFilter: GfxMipFilterMode.NO_MIP,
+        const device = cache.device;
+        const texture = this.translateTexture(device, tex0, this.material.textureName, this.material.paletteName);
+        if (texture !== null) {
+            this.gfxSampler = cache.createSampler({
+                minFilter: GfxTexFilterMode.Point,
+                magFilter: GfxTexFilterMode.Point,
+                mipFilter: GfxMipFilterMode.Nearest,
                 wrapS: parseTexImageParamWrapModeS(this.material.texParams),
                 wrapT: parseTexImageParamWrapModeT(this.material.texParams),
                 minLOD: 0,
@@ -71,36 +71,39 @@ class MaterialInstance {
         // NITRO's Rendering Engine uses two passes. Opaque, then Transparent.
         // A transparent polygon is one that has an alpha of < 0xFF, or uses
         // A5I3 / A3I5 textures.
-        const isTranslucent = (this.material.alpha < 0xFF) || (this.texture && textureFormatIsTranslucent(this.texture.format));
+        const isTranslucent = (this.material.alpha < 0xFF) || (texture !== null && textureFormatIsTranslucent(texture.format));
         const xl = !!((this.material.polyAttribs >>> 11) & 0x01);
         const depthWrite = xl || !isTranslucent;
 
         const layer = isTranslucent ? GfxRendererLayer.TRANSLUCENT : GfxRendererLayer.OPAQUE;
         this.sortKey = makeSortKeyOpaque(layer, 0);
         this.megaStateFlags = {
-            blendMode: GfxBlendMode.ADD,
-            blendDstFactor: GfxBlendFactor.ONE_MINUS_SRC_ALPHA,
-            blendSrcFactor: GfxBlendFactor.SRC_ALPHA,
             depthWrite: depthWrite,
             cullMode: this.material.cullMode,
         };
+
+        setAttachmentStateSimple(this.megaStateFlags, {
+            blendMode: GfxBlendMode.Add,
+            blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
+            blendSrcFactor: GfxBlendFactor.SrcAlpha,
+        });
     }
 
-    public bindSRT0(animationController: AnimationController, srt0: NSBTA.SRT0): void {
-        this.srt0Animator = NSBTA.bindSRT0(animationController, srt0, this.material.name);
+    public bindSRT0(animationController: AnimationController, srt0: SRT0): void {
+        this.srt0Animator = bindSRT0(animationController, srt0, this.material.name);
     }
 
-    public bindPAT0(animationController: AnimationController, pat0: NSBTP.PAT0): boolean {
-        this.pat0Animator = NSBTP.bindPAT0(animationController, pat0, this.material.name);
+    public bindPAT0(animationController: AnimationController, pat0: PAT0): boolean {
+        this.pat0Animator = bindPAT0(animationController, pat0, this.material.name);
         return this.pat0Animator !== null;
     }
 
-    public translatePAT0Textures(device: GfxDevice, hostAccessPass: GfxHostAccessPass, tex0: TEX0): void {
+    public translatePAT0Textures(device: GfxDevice, tex0: TEX0): void {
         if (this.pat0Animator === null)
             return;
 
         while (this.gfxTextures.length > 1) {
-            device.destroyTexture(this.gfxTextures.pop());
+            device.destroyTexture(this.gfxTextures.pop()!);
             this.textureNames.pop();
             this.viewerTextures.pop();
         }
@@ -111,26 +114,27 @@ class MaterialInstance {
         }
     }
 
-    private translateTexture(device: GfxDevice, tex0: TEX0, textureName: string, paletteName: string) {
-        const texture = tex0.textures.find((t) => t.name === textureName);
-        const palette = paletteName !== null ? tex0.palettes.find((t) => t.name === paletteName) : null;
+    private translateTexture(device: GfxDevice, tex0: TEX0 | null, textureName: string | null, paletteName: string | null): TEX0Texture | null {
+        if (tex0 === null || textureName === null)
+            return null;
+
+        const texture = assertExists(tex0.textures.find((t) => t.name === textureName));
+        const palette = paletteName !== null ? assertExists(tex0.palettes.find((t) => t.name === paletteName)) : null;
         const fullTextureName = `${textureName}/${paletteName}`;
         if (this.textureNames.indexOf(fullTextureName) >= 0)
-            return;
+            return texture;
         this.textureNames.push(fullTextureName);
 
         const inTexture: Texture = { ...texture, palData: palette !== null ? palette.data : null } as Texture;
         const pixels = readTexture(inTexture);
-        const gfxTexture = device.createTexture({
-            dimension: GfxTextureDimension.n2D, pixelFormat: GfxFormat.U8_RGBA,
-            width: texture.width, height: texture.height, depth: 1, numLevels: 1,
-        });
+        const gfxTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, texture.width, texture.height, 1));
+        device.setResourceName(gfxTexture, textureName);
         this.gfxTextures.push(gfxTexture);
-        const hostAccessPass = device.createHostAccessPass();
-        hostAccessPass.uploadTextureData(gfxTexture, 0, [pixels]);
-        device.submitPass(hostAccessPass);
+
+        device.uploadTextureData(gfxTexture, 0, [pixels]);
 
         this.viewerTextures.push(textureToCanvas(texture, pixels, fullTextureName));
+        return texture;
     }
 
     public setOnRenderInst(template: GfxRenderInst, viewerInput: Viewer.ViewerRenderInput): void {
@@ -145,43 +149,37 @@ class MaterialInstance {
 
         if (this.pat0Animator !== null) {
             const fullTextureName = this.pat0Animator.calcFullTextureName();
-            let textureIndex = this.textureNames.indexOf(fullTextureName);
+            const textureIndex = this.textureNames.indexOf(fullTextureName);
             if (textureIndex >= 0)
                 this.textureMappings[0].gfxTexture = this.gfxTextures[textureIndex];
         }
 
         template.setSamplerBindingsFromTextureMappings(this.textureMappings);
 
-        let offs = template.allocateUniformBuffer(NITRO_Program.ub_MaterialParams, 12);
-        const materialParamsMapped = template.mapUniformBufferF32(NITRO_Program.ub_MaterialParams);
-        offs += fillMatrix3x2(materialParamsMapped, offs, scratchTexMatrix);
-        offs += fillVec4(materialParamsMapped, offs, 0);
+        let offs = template.allocateUniformBuffer(NITRO_Program.ub_MaterialParams, 8+16);
+        const d = template.mapUniformBufferF32(NITRO_Program.ub_MaterialParams);
+        offs += fillMatrix3x2(d, offs, scratchTexMatrix);
+        offs += fillColor(d, offs, this.diffuseColor, 0);
+        offs += fillColor(d, offs, this.ambientColor, this.lightMask);
+        offs += fillColor(d, offs, this.specularColor);
+        offs += fillColor(d, offs, this.emissionColor);
     }
 
     public destroy(device: GfxDevice): void {
         for (let i = 0; i < this.gfxTextures.length; i++)
             device.destroyTexture(this.gfxTextures[i]);
-        if (this.gfxSampler !== null)
-            device.destroySampler(this.gfxSampler);
     }
 }
 
 class Node {
     public modelMatrix = mat4.create();
-    public billboardY: boolean = false;
+    public billboardMode = BillboardMode.NONE;
 
-    constructor(public node: NSBMD.MDL0Node) {
+    constructor(public node: MDL0Node) {
     }
 
-    public calcMatrix(baseModelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput): void {
-        if (this.billboardY) {
-            computeModelMatrixYBillboard(this.modelMatrix, viewerInput.camera);
-            mat4.mul(this.modelMatrix, this.node.jointMatrix, this.modelMatrix);
-        } else {
-            mat4.copy(this.modelMatrix, this.node.jointMatrix);
-        }
-
-        mat4.mul(this.modelMatrix, baseModelMatrix, this.modelMatrix);
+    public calcMatrix(baseModelMatrix: mat4): void {
+        mat4.mul(this.modelMatrix, baseModelMatrix, this.node.jointMatrix);
     }
 }
 
@@ -189,10 +187,10 @@ const scratchMat4 = mat4.create();
 class ShapeInstance {
     private vertexData: VertexData;
 
-    constructor(device: GfxDevice, private materialInstance: MaterialInstance, public node: Node, public shape: NSBMD.MDL0Shape, posScale: number) {
+    constructor(cache: GfxRenderCache, private materialInstance: MaterialInstance, public node: Node, public shape: MDL0Shape, posScale: number) {
         const baseCtx = this.materialInstance.baseCtx;
         const nitroVertexData = NITRO_GX.readCmds(shape.dlBuffer, baseCtx, posScale);
-        this.vertexData = new VertexData(device, nitroVertexData);
+        this.vertexData = new VertexData(cache, nitroVertexData);
     }
 
     private computeModelView(dst: mat4, viewerInput: Viewer.ViewerRenderInput, isSkybox: boolean): void {
@@ -203,27 +201,31 @@ class ShapeInstance {
         }
 
         mat4.mul(dst, dst, this.node.modelMatrix);
+
+        if (this.node.billboardMode === BillboardMode.BB)
+            calcBillboardMatrix(dst, dst, CalcBillboardFlags.UseRollLocal | CalcBillboardFlags.PriorityZ | CalcBillboardFlags.UseZPlane);
+        else if (this.node.billboardMode === BillboardMode.BBY)
+            calcBillboardMatrix(dst, dst, CalcBillboardFlags.UseRollLocal | CalcBillboardFlags.PriorityY | CalcBillboardFlags.UseZPlane);
     }
 
     public prepareToRender(renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, isSkybox: boolean): void {
-        const template = renderInstManager.pushTemplateRenderInst();
-        template.setInputLayoutAndState(this.vertexData.inputLayout, this.vertexData.inputState);
+        if (!this.materialInstance.visible)
+            return;
 
-        let offs = template.allocateUniformBuffer(NITRO_Program.ub_PacketParams, 12*8);
-        const packetParamsMapped = template.mapUniformBufferF32(NITRO_Program.ub_PacketParams);
+        const renderInst = renderInstManager.newRenderInst();
+        renderInst.setVertexInput(this.vertexData.inputLayout, this.vertexData.vertexBufferDescriptors, this.vertexData.indexBufferDescriptor);
+
+        let offs = renderInst.allocateUniformBuffer(NITRO_Program.ub_DrawParams, 12*32);
+        const drawParamsMapped = renderInst.mapUniformBufferF32(NITRO_Program.ub_DrawParams);
 
         this.computeModelView(scratchMat4, viewerInput, isSkybox);
-        offs += fillMatrix4x3(packetParamsMapped, offs, scratchMat4);
+        offs += fillMatrix4x3(drawParamsMapped, offs, scratchMat4);
 
-        this.materialInstance.setOnRenderInst(template, viewerInput);
+        this.materialInstance.setOnRenderInst(renderInst, viewerInput);
 
-        for (let i = 0; i < this.vertexData.nitroVertexData.drawCalls.length; i++) {
-            const drawCall = this.vertexData.nitroVertexData.drawCalls[i];
-            const renderInst = renderInstManager.pushRenderInst();
-            renderInst.drawIndexes(drawCall.numIndices, drawCall.startIndex);
-        }
-
-        renderInstManager.popTemplateRenderInst();
+        const drawCall = this.vertexData.nitroVertexData.drawCall;
+        renderInst.setDrawCount(drawCall.numIndices, drawCall.startIndex);
+        renderInstManager.submitRenderInst(renderInst);
     }
 
     public destroy(device: GfxDevice): void {
@@ -231,34 +233,35 @@ class ShapeInstance {
     }
 }
 
-export const enum G3DPass {
-    MAIN = 0x01,
-    SKYBOX = 0x02,
+export const nnsG3dBindingLayouts: GfxBindingLayoutDescriptor[] = [{ numUniformBuffers: 3, numSamplers: 1 }];
+
+enum BillboardMode {
+    NONE, BB, BBY,
 }
 
-const bindingLayouts: GfxBindingLayoutDescriptor[] = [{ numUniformBuffers: 3, numSamplers: 1 }];
-
 export class MDL0Renderer {
+    private visible = true;
     public modelMatrix = mat4.create();
     public isSkybox: boolean = false;
     public animationController = new AnimationController();
 
     private gfxProgram: GfxProgram;
-    private materialInstances: MaterialInstance[] = [];
+    public materialInstances: MaterialInstance[] = [];
     private shapeInstances: ShapeInstance[] = [];
     private nodes: Node[] = [];
     public viewerTextures: Viewer.Texture[] = [];
+    public bbox: AABB | null = null;
 
-    constructor(device: GfxDevice, public model: NSBMD.MDL0Model, private tex0: TEX0) {
+    constructor(cache: GfxRenderCache, public model: MDL0Model, private tex0: TEX0) {
         const program = new NITRO_Program();
         program.defines.set('USE_VERTEX_COLOR', '1');
         program.defines.set('USE_TEXTURE', '1');
-        this.gfxProgram = device.createProgram(program);
+        this.gfxProgram = cache.createProgram(program);
         const posScale = 50;
         mat4.fromScaling(this.modelMatrix, [posScale, posScale, posScale]);
 
         for (let i = 0; i < this.model.materials.length; i++)
-            this.materialInstances.push(new MaterialInstance(device, this.tex0, this.model, this.model.materials[i]));
+            this.materialInstances.push(new MaterialInstance(cache, this.tex0, this.model, this.model.materials[i]));
 
         for (let i = 0; i < this.model.nodes.length; i++)
             this.nodes.push(new Node(this.model.nodes[i]));
@@ -267,34 +270,32 @@ export class MDL0Renderer {
             if (this.materialInstances[i].viewerTextures.length > 0)
                 this.viewerTextures.push(this.materialInstances[i].viewerTextures[0]);
 
-        this.execSBC(device);
+        this.execSBC(cache);
     }
 
-    public bindSRT0(srt0: NSBTA.SRT0, animationController: AnimationController = this.animationController): void {
+    public bindSRT0(srt0: SRT0, animationController: AnimationController = this.animationController): void {
         for (let i = 0; i < this.materialInstances.length; i++)
             this.materialInstances[i].bindSRT0(animationController, srt0);
     }
 
-    public bindPAT0(device: GfxDevice, pat0: NSBTP.PAT0, animationController: AnimationController = this.animationController): void {
-        const hostAccessPass = device.createHostAccessPass();
+    public bindPAT0(device: GfxDevice, pat0: PAT0, animationController: AnimationController = this.animationController): void {
         for (let i = 0; i < this.materialInstances.length; i++) {
             if (this.materialInstances[i].bindPAT0(animationController, pat0))
-                this.materialInstances[i].translatePAT0Textures(device, hostAccessPass, this.tex0);
+                this.materialInstances[i].translatePAT0Textures(device, this.tex0);
         }
-        device.submitPass(hostAccessPass);
     }
 
-    private execSBC(device: GfxDevice) {
+    private execSBC(cache: GfxRenderCache) {
         const model = this.model;
         const view = model.sbcBuffer.createDataView();
 
-        const enum Op {
+        enum Op {
             NOP, RET, NODE, MTX, MAT, SHP, NODEDESC, BB, BBY, NODEMIX, CALLDL, POSSCALE, ENVMAP, PRJMAP,
         };
 
         let idx = 0;
-        let currentNode: Node;
-        let currentMaterial: MaterialInstance;
+        let currentNode: Node | null = null;
+        let currentMaterial: MaterialInstance | null = null;
         while (true) {
             const w0 = view.getUint8(idx++);
             const cmd = w0 & 0x1F;
@@ -315,7 +316,7 @@ export class MDL0Renderer {
             } else if (cmd === Op.SHP) {
                 const shpIdx = view.getUint8(idx++);
                 const shape = model.shapes[shpIdx];
-                this.shapeInstances.push(new ShapeInstance(device, currentMaterial, currentNode, shape, this.model.posScale));
+                this.shapeInstances.push(new ShapeInstance(cache, assertExists(currentMaterial), assertExists(currentNode), shape, this.model.posScale));
             } else if (cmd === Op.NODEDESC) {
                 const idxNode = view.getUint8(idx++);
                 const idxNodeParent = view.getUint8(idx++);
@@ -326,12 +327,15 @@ export class MDL0Renderer {
                 if (opt & 0x02)
                     srcIdx = view.getUint8(idx++);
             } else if (cmd === Op.BB) {
-                const nodeId = view.getUint8(idx++);
+                const nodeIdx = view.getUint8(idx++);
                 let destIdx = -1, srcIdx = -1;
                 if (opt & 0x01)
                     destIdx = view.getUint8(idx++);
                 if (opt & 0x02)
                     srcIdx = view.getUint8(idx++);
+
+                if (opt === 0)
+                    this.nodes[nodeIdx].billboardMode = BillboardMode.BB;
             } else if (cmd === Op.BBY) {
                 const nodeIdx = view.getUint8(idx++);
                 let destIdx = -1, srcIdx = -1;
@@ -341,7 +345,7 @@ export class MDL0Renderer {
                     srcIdx = view.getUint8(idx++);
 
                 if (opt === 0)
-                    this.nodes[nodeIdx].billboardY = true;
+                    this.nodes[nodeIdx].billboardMode = BillboardMode.BBY;
             } else if (cmd === Op.POSSCALE) {
                 //
             } else {
@@ -351,28 +355,27 @@ export class MDL0Renderer {
     }
 
     public prepareToRender(renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible)
+            return;
+        if (this.bbox !== null && !viewerInput.camera.frustum.contains(this.bbox))
+            return;
+
         this.animationController.setTimeInMilliseconds(viewerInput.time);
 
         for (let i = 0; i < this.nodes.length; i++)
-            this.nodes[i].calcMatrix(this.modelMatrix, viewerInput);
+            this.nodes[i].calcMatrix(this.modelMatrix);
 
-        const template = renderInstManager.pushTemplateRenderInst();
-        template.setBindingLayouts(bindingLayouts);
-        template.filterKey = this.isSkybox ? G3DPass.SKYBOX : G3DPass.MAIN;
+        const template = renderInstManager.pushTemplate();
+        template.setBindingLayouts(nnsG3dBindingLayouts);
         template.setGfxProgram(this.gfxProgram);
-
-        let offs = template.allocateUniformBuffer(NITRO_Program.ub_SceneParams, 16);
-        const sceneParamsMapped = template.mapUniformBufferF32(NITRO_Program.ub_SceneParams);
-        offs += fillMatrix4x4(sceneParamsMapped, offs, viewerInput.camera.projectionMatrix);
 
         for (let i = 0; i < this.shapeInstances.length; i++)
             this.shapeInstances[i].prepareToRender(renderInstManager, viewerInput, this.isSkybox);
 
-        renderInstManager.popTemplateRenderInst();
+        renderInstManager.popTemplate();
     }
 
     public destroy(device: GfxDevice): void {
-        device.destroyProgram(this.gfxProgram);
         for (let i = 0; i < this.materialInstances.length; i++)
             this.materialInstances[i].destroy(device);
         for (let i = 0; i < this.shapeInstances.length; i++)

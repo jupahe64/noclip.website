@@ -1,44 +1,57 @@
 
-import ArrayBufferSlice from './ArrayBufferSlice';
+import ArrayBufferSlice from './ArrayBufferSlice.js';
 
-export function assert(b: boolean, message: string = ""): void {
-    if (!b) { console.error(new Error().stack); throw new Error(`Assert fail: ${message}`); }
+export function assert(b: boolean, message: string = ""): asserts b {
+    if (!b) {
+        console.error(new Error().stack);
+        throw new Error(`Assert fail: ${message}`);
+    }
 }
 
-function makeTextDecoder(encoding: string): TextDecoder | null {
-    if ((window as any).TextDecoder)
-        return new TextDecoder(encoding);
-    else
-        return null;
-}
-
-const textDecoderCache = new Map<string, TextDecoder | null>();
-export function getTextDecoder(encoding: string): TextDecoder | null {
-    if (!textDecoderCache.has(encoding))
-        textDecoderCache.set(encoding, makeTextDecoder(encoding));
-    return textDecoderCache.get(encoding)!;
-}
-
-export function assertExists<T>(v: T | null | undefined): T {
+export function assertExists<T>(v: T | null | undefined, name: string = ''): T {
     if (v !== undefined && v !== null)
         return v;
     else
-        throw new Error("Missing object");
+        throw new Error(`Missing object ${name}`);
 }
 
-export function readString(buffer: ArrayBufferSlice, offs: number, length: number = -1, nulTerminated: boolean = true): string {
+export function nullify<T>(v: T | undefined | null): T | null {
+    return v === undefined ? null : v;
+}
+
+export function readString(buffer: ArrayBufferSlice, offs: number, length: number = -1, nulTerminated: boolean = true, encoding: string | null = null): string {
+    const buf = buffer.createTypedArray(Uint8Array, offs);
+    if (length < 0)
+        length = buf.byteLength;
+    let byteLength = 0;
+    while (true) {
+        if (byteLength >= length)
+            break;
+        if (nulTerminated && buf[byteLength] === 0)
+            break;
+        byteLength++;
+    }
+
+    if (byteLength === 0)
+        return "";
+
+    if (encoding !== null) {
+        return decodeString(buffer, offs, byteLength, encoding);
+    } else {
+        return copyBufferToString(buffer, offs, byteLength);
+    }
+}
+
+function copyBufferToString(buffer: ArrayBufferSlice, offs: number, byteLength: number): string {
     const buf = buffer.createTypedArray(Uint8Array, offs);
     let S = '';
-    let i = 0;
-    while (true) {
-        if (length >= 0 && i >= length)
-            break;
-        if (nulTerminated && buf[i] === 0)
-            break;
+    for (let i = 0; i < byteLength; i++)
         S += String.fromCharCode(buf[i]);
-        i++;
-    }
     return S;
+}
+
+export function decodeString(buffer: ArrayBufferSlice, offs: number | undefined = undefined, byteLength: number | undefined = undefined, encoding = 'utf8'): string {
+    return new TextDecoder(encoding)!.decode(buffer.copyToBuffer(offs, byteLength));
 }
 
 // Requires that multiple is a power of two.
@@ -51,61 +64,95 @@ export function alignNonPowerOfTwo(n: number, multiple: number): number {
     return (((n + multiple - 1) / multiple) | 0) * multiple;
 }
 
-export function nArray<T>(n: number, c: () => T): T[] {
+export function nArray<T>(n: number, c: (i: number) => T): T[] {
     const d = new Array(n);
-    while (n--)
-        d[n] = c();
+    for (let i = 0; i < n; i++)
+        d[i] = c(i);
     return d;
 }
 
-// Eat your heart out, npm.
 export function leftPad(S: string, spaces: number, ch: string = '0'): string {
-    while (S.length < spaces)
-        S = `${ch}${S}`;
-    return S;
+    return S.padStart(spaces, ch);
 }
 
 export function hexzero(n: number, spaces: number): string {
-    let S = n.toString(16);
+    let S = (n >>> 0).toString(16);
     return leftPad(S, spaces);
 }
 
-export function hexdump(b_: ArrayBufferSlice | ArrayBuffer, offs: number = 0, length: number = 0x100): void {
-    const buffer: ArrayBufferSlice = b_ instanceof ArrayBufferSlice ? b_ : new ArrayBufferSlice(b_);
-    const groupSize_ = 16;
-    let S = '';
-    const arr = buffer.createTypedArray(Uint8Array, offs);
-    length = Math.min(length, arr.byteLength);
-    for (let i = 0; i < length; i += groupSize_) {
-        let groupSize = Math.min(length - i, groupSize_);
-        const addr = offs + i;
-        S += `${hexzero(addr, 8)}    `;
-        for (let j = 0; j < groupSize; j++) {
-            const b = arr[i + j];
-            S += ` ${hexzero(b, 2)}`;
-        }
-        for (let j = groupSize; j < groupSize_; j++)
-            S += `   `;
+export function hexzero0x(n: number, spaces: number = 8): string {
+    if (n < 0)
+        return `-0x${hexzero(-n, spaces)}`;
+    else
+        return `0x${hexzero(n, spaces)}`;
+}
 
-        S += '  ';
-        for (let j = 0; j < groupSize; j++) {
-            const b = arr[i + j];
-            const c = (b >= 0x20 && b < 0x7F) ? String.fromCharCode(b) : '.';
-            S += `${c}`;
-        }
-        for (let j = groupSize; j < groupSize_; j++)
-            S += ` `;
+export function flatten<T>(L: T[][]): T[] {
+    const R: T[] = [];
+    for (let i = 0; i < L.length; i++)
+        R.push(... L[i]);
+    return R;
+}
 
-        S += '\n';
+export function fallback<T>(v: T | null, fallback: T): T {
+    return v !== null ? v : fallback;
+}
+
+export function fallbackUndefined<T>(v: T | null | undefined, fallback: T): T {
+    return (v !== null && v !== undefined) ? v : fallback;
+}
+
+export function arraySwap<T>(L: T[], ia: number, ib: number): void {
+    const tmp: T = L[ia];
+    L[ia] = L[ib];
+    L[ib] = tmp;
+}
+
+export function arrayRemove<T>(L: T[], n: T): number {
+    const idx = L.indexOf(n);
+    assert(idx >= 0);
+    L.splice(idx, 1);
+    return idx;
+}
+
+export function arrayRemoveIfExist<T>(L: T[], n: T): number {
+    const idx = L.indexOf(n);
+    if (idx >= 0)
+        L.splice(idx, 1);
+    return idx;
+}
+
+export function bisectRight<T>(L: T[], e: T, compare: (a: T, b: T) => number): number {
+    let lo = 0, hi = L.length;
+    while (lo < hi) {
+        const mid = lo + ((hi - lo) >>> 1);
+        const cmp = compare(e, L[mid]);
+        if (cmp < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
     }
-    console.log(S);
+    return lo;
 }
 
-export function wordCountFromByteCount(byteCount: number): number {
-    return align(byteCount, 4) / 4;
+export function spliceBisectRight<T>(L: T[], e: T, compare: (a: T, b: T) => number): void {
+    const idx = bisectRight(L, e, compare);
+    L.splice(idx, 0, e);
 }
 
-export function concat<T>(dst: T[], src: T[]): void {
-    for (let i = 0; i < src.length; i++)
-        dst.push(src[i]);
+export function setBitFlagEnabled(v: number, mask: number, enabled: boolean): number {
+    if (enabled)
+        v |= mask;
+    else
+        v &= ~mask;
+    return v;
+}
+
+export function mod(a: number, b: number): number {
+    return (a + b) % b;
+}
+
+export function ensureInList<T>(L: T[], v: T): void {
+    if (!L.includes(v))
+        L.push(v);
 }

@@ -1,19 +1,20 @@
 
-import * as Viewer from '../viewer';
-import * as U8 from './u8';
-import * as BRRES from './brres';
+import * as Viewer from '../viewer.js';
+import * as BRRES from './brres.js';
+import * as U8 from './u8.js';
 
-import ArrayBufferSlice from "../ArrayBufferSlice";
 import { vec3 } from "gl-matrix";
-import { readString, assert, assertExists } from "../util";
-import { GfxDevice, GfxHostAccessPass, GfxRenderPass } from '../gfx/platform/GfxPlatform';
-import { MDL0ModelInstance, RRESTextureHolder, MDL0Model } from './render';
-import AnimationController from '../AnimationController';
-import { GXRenderHelperGfx } from '../gx/gx_render';
-import { BasicRenderTarget, standardFullClearRenderPassDescriptor, depthClearRenderPassDescriptor } from '../gfx/helpers/RenderTargetHelpers';
-import { GXMaterialHacks } from '../gx/gx_material';
-import { executeOnPass } from '../gfx/render/GfxRenderer2';
-import { SceneContext } from '../SceneBase';
+import AnimationController from '../AnimationController.js';
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { SceneContext } from '../SceneBase.js';
+import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from '../gfx/helpers/RenderGraphHelpers.js';
+import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
+import { GfxrAttachmentSlot } from '../gfx/render/GfxRenderGraph.js';
+import { GfxRenderInstList } from '../gfx/render/GfxRenderInstManager.js';
+import { GXMaterialHacks } from '../gx/gx_material.js';
+import { GXRenderHelperGfx, fillSceneParamsDataOnTemplate } from '../gx/gx_render.js';
+import { assert, assertExists, readString } from "../util.js";
+import { MDL0Model, MDL0ModelInstance, RRESTextureHolder } from './render.js';
 
 interface MapEntry {
     index: number;
@@ -57,9 +58,9 @@ enum SonicColorsPass {
 }
 
 class SonicColorsRenderer implements Viewer.SceneGfx {
-    public renderTarget = new BasicRenderTarget();
-
     public renderHelper: GXRenderHelperGfx;
+    private renderInstListSky = new GfxRenderInstList();
+    private renderInstListMain = new GfxRenderInstList();
     public textureHolder = new RRESTextureHolder();
     public animationController = new AnimationController();
 
@@ -70,43 +71,66 @@ class SonicColorsRenderer implements Viewer.SceneGfx {
         this.renderHelper = new GXRenderHelperGfx(device);
     }
 
-    protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    private preparePass(device: GfxDevice, list: GfxRenderInstList, passMask: number, viewerInput: Viewer.ViewerRenderInput): void {
+        const renderInstManager = this.renderHelper.renderInstManager;
+        renderInstManager.setCurrentList(list);
+        for (let i = 0; i < this.modelInstances.length; i++) {
+            const m = this.modelInstances[i];
+            if (!(m.passMask & passMask))
+                continue;
+            m.prepareToRender(device, renderInstManager, viewerInput);
+        }
+    }
+
+    protected prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
         this.animationController.setTimeInMilliseconds(viewerInput.time);
 
         const template = this.renderHelper.pushTemplateRenderInst();
-        this.renderHelper.fillSceneParams(viewerInput, template);
-        for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
-        this.renderHelper.prepareToRender(device, hostAccessPass);
-        this.renderHelper.renderInstManager.popTemplateRenderInst();
+        fillSceneParamsDataOnTemplate(template, viewerInput);
+        this.preparePass(device, this.renderInstListSky, SonicColorsPass.SKYBOX, viewerInput);
+        this.preparePass(device, this.renderInstListMain, SonicColorsPass.MAIN, viewerInput);
+        this.renderHelper.prepareToRender();
+        this.renderHelper.renderInstManager.popTemplate();
     }
 
-    public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): GfxRenderPass {
-        const hostAccessPass = device.createHostAccessPass();
-        this.prepareToRender(device, hostAccessPass, viewerInput);
-        device.submitPass(hostAccessPass);
+    public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput) {
+        const renderInstManager = this.renderHelper.renderInstManager;
+        const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
-        this.renderTarget.setParameters(device, viewerInput.viewportWidth, viewerInput.viewportHeight);
-        // First, render the skybox.
-        const skyboxPassRenderer = this.renderTarget.createRenderPass(device, standardFullClearRenderPassDescriptor);
-        skyboxPassRenderer.setViewport(viewerInput.viewportWidth, viewerInput.viewportHeight);
-        executeOnPass(this.renderHelper.renderInstManager, device, skyboxPassRenderer, SonicColorsPass.SKYBOX);
-        skyboxPassRenderer.endPass(null);
-        device.submitPass(skyboxPassRenderer);
-        // Now do main pass.
-        const mainPassRenderer = this.renderTarget.createRenderPass(device, depthClearRenderPassDescriptor);
-        executeOnPass(this.renderHelper.renderInstManager, device, mainPassRenderer, SonicColorsPass.MAIN);
-        this.renderHelper.renderInstManager.resetRenderInsts();
-        return mainPassRenderer;
+        const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
+
+        const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
+        builder.pushPass((pass) => {
+            pass.setDebugName('Skybox');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            const skyboxDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Skybox Depth');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, skyboxDepthTargetID);
+            pass.exec((passRenderer) => {
+                this.renderInstListSky.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+        const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
+        builder.pushPass((pass) => {
+            pass.setDebugName('Main');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
+            pass.exec((passRenderer) => {
+                this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+        this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
+        builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
+
+        this.prepareToRender(device, viewerInput);
+        this.renderHelper.renderGraph.execute(builder);
+        this.renderInstListSky.reset();
+        this.renderInstListMain.reset();
     }
 
     public destroy(device: GfxDevice): void {
         this.textureHolder.destroy(device);
-        this.renderTarget.destroy(device);
-        this.renderHelper.destroy(device);
-
-        for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].destroy(device);
+        this.renderHelper.destroy();
 
         for (let i = 0; i < this.modelData.length; i++)
             this.modelData[i].destroy(device);
@@ -117,7 +141,7 @@ const materialHacks: GXMaterialHacks = {
     lightingFudge: (p) => `${p.ambSource} + 0.6`,
 };
 
-const pathBase = `sonic_colors`;
+const pathBase = `SonicColors`;
 class SonicColorsSceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {
     }
@@ -157,7 +181,7 @@ class SonicColorsSceneDesc implements Viewer.SceneDesc {
                 for (let i = 0; i < mapFile.entries.length; i++) {
                     const entry = mapFile.entries[i];
                     const entryArc = U8.parse(entryArcDatas[i]);
-                    const dir = entryArc.findDir(`arc`);
+                    const dir = assertExists(entryArc.findDir(`arc`));
 
                     for (let j = 0; j < dir.files.length; j++) {
                         const rres = BRRES.parse(dir.files[j].buffer);
@@ -182,27 +206,34 @@ class SonicColorsSceneDesc implements Viewer.SceneDesc {
 const id = 'sonic_colors';
 const name = "Sonic Colors";
 const sceneDescs = [
-    new SonicColorsSceneDesc("stg110", "stg110"),
-    new SonicColorsSceneDesc("stg120", "stg120"),
-    new SonicColorsSceneDesc("stg190", "stg190"),
-    new SonicColorsSceneDesc("stg210", "stg210"),
-    new SonicColorsSceneDesc("stg220", "stg220"),
-    new SonicColorsSceneDesc("stg290", "stg290"),
-    new SonicColorsSceneDesc("stg310", "stg310"),
-    new SonicColorsSceneDesc("stg320", "stg320"),
-    new SonicColorsSceneDesc("stg390", "stg390"),
-    new SonicColorsSceneDesc("stg410", "stg410"),
-    new SonicColorsSceneDesc("stg420", "stg420"),
-    new SonicColorsSceneDesc("stg490", "stg490"),
-    new SonicColorsSceneDesc("stg510", "stg510"),
-    new SonicColorsSceneDesc("stg520", "stg520"),
-    new SonicColorsSceneDesc("stg590", "stg590"),
-    new SonicColorsSceneDesc("stg610", "stg610"),
-    new SonicColorsSceneDesc("stg620", "stg620"),
-    new SonicColorsSceneDesc("stg690", "stg690"),
-    new SonicColorsSceneDesc("stg710", "stg710"),
-    new SonicColorsSceneDesc("stg720", "stg720"),
-    new SonicColorsSceneDesc("stg790", "stg790"),
+    "Tropical Resort",
+    new SonicColorsSceneDesc("stg110", "Act 1-2, 4"),
+    new SonicColorsSceneDesc("stg120", "Act 3, 5-6"),
+    new SonicColorsSceneDesc("stg190", "Rotatotron Boss Arena"),
+    "Sweet Mountain",
+    new SonicColorsSceneDesc("stg210", "Act 1-2, 6"),
+    new SonicColorsSceneDesc("stg220", "Act 3-5"),
+    new SonicColorsSceneDesc("stg290", "Captain Jelly Boss Arena"),
+    //"Starlight Carnival",
+    //new SonicColorsSceneDesc("stg310", "Map 1"),
+    //new SonicColorsSceneDesc("stg320", "Map 2"),
+    //new SonicColorsSceneDesc("stg390", "Figate Orcan Boss Arena"),
+    "Planet Wisp",
+    new SonicColorsSceneDesc("stg410", "Act 1-4"),
+    new SonicColorsSceneDesc("stg420", "Act 5-6"),
+    new SonicColorsSceneDesc("stg490", "Refreshinator Boss Arena"),
+    "Aquarium Park",
+    new SonicColorsSceneDesc("stg510", "Act 1, 3-5"),
+    new SonicColorsSceneDesc("stg520", "Act 2, 6"),
+    new SonicColorsSceneDesc("stg590", "Admiral Jelly Boss Arena"),
+    "Asteroid Coaster",
+    new SonicColorsSceneDesc("stg610", "Act 1-5"),
+    new SonicColorsSceneDesc("stg620", "Act 6"),
+    new SonicColorsSceneDesc("stg690", "Figate Skullian Boss Arena"),
+    "Terminal Velocity",
+    new SonicColorsSceneDesc("stg710", "Act 1"),
+    new SonicColorsSceneDesc("stg720", "Act 2"),
+    new SonicColorsSceneDesc("stg790", "Nega-Wisp Armor Boss Arena"),
 ];
 
 export const sceneGroup: Viewer.SceneGroup = { id, name, sceneDescs };

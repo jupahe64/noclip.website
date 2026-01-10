@@ -1,22 +1,24 @@
 
 // Elebits
 
-import * as Viewer from '../viewer';
-import * as UI from '../ui';
-import * as BRRES from './brres';
+import * as Viewer from '../viewer.js';
+import * as UI from '../ui.js';
+import * as BRRES from './brres.js';
 
-import { leftPad } from '../util';
-import ArrayBufferSlice from '../ArrayBufferSlice';
-import { GfxDevice, GfxHostAccessPass } from '../gfx/platform/GfxPlatform';
-import { MDL0ModelInstance, MDL0Model, RRESTextureHolder } from './render';
-import { BasicGXRendererHelper } from '../gx/gx_render';
-import AnimationController from '../AnimationController';
-import { GXMaterialHacks } from '../gx/gx_material';
-import { SceneContext } from '../SceneBase';
+import { leftPad } from '../util.js';
+import ArrayBufferSlice from '../ArrayBufferSlice.js';
+import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
+import { MDL0ModelInstance, MDL0Model, RRESTextureHolder } from './render.js';
+import { BasicGXRendererHelper, fillSceneParamsDataOnTemplate } from '../gx/gx_render.js';
+import AnimationController from '../AnimationController.js';
+import { GXMaterialHacks } from '../gx/gx_material.js';
+import { SceneContext } from '../SceneBase.js';
+import { range } from '../MathHelpers.js';
+import { CameraController } from '../Camera.js';
 
 function makeElbPath(stg: string, room: number): string {
     let z = leftPad(''+room, 2);
-    return `elb/${stg}_${z}_disp01.brres`;
+    return `Elebits/${stg}_${z}_disp01.brres`;
 }
 
 const materialHacks: GXMaterialHacks = {
@@ -49,6 +51,10 @@ class ElebitsRenderer extends BasicGXRendererHelper {
         }
     }
 
+    public adjustCameraController(c: CameraController) {
+        c.setSceneMoveSpeedMult(24/60);
+    }
+
     public createPanels(): UI.Panel[] {
         const panels: UI.Panel[] = [];
 
@@ -61,34 +67,32 @@ class ElebitsRenderer extends BasicGXRendererHelper {
         return panels;
     }
 
-    protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    protected prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
         const template = this.renderHelper.pushTemplateRenderInst();
-        this.renderHelper.fillSceneParams(viewerInput, template);
+        fillSceneParamsDataOnTemplate(template, viewerInput);
         for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
-        this.renderHelper.prepareToRender(device, hostAccessPass);
-        this.renderHelper.renderInstManager.popTemplateRenderInst();
+            this.modelInstances[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput);
+        this.renderHelper.prepareToRender();
+        this.renderHelper.renderInstManager.popTemplate();
     }
 
-    public destroy(device: GfxDevice): void {
+    public override destroy(device: GfxDevice): void {
         super.destroy(device);
 
         this.textureHolder.destroy(device);
-        this.renderHelper.destroy(device);
+        this.renderHelper.destroy();
 
         for (let i = 0; i < this.models.length; i++)
             this.models[i].destroy(device);
-        for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].destroy(device);
     }
 }
 
 class ElebitsSceneDesc implements Viewer.SceneDesc {
-    constructor(public id: string, public name: string, public rooms: number[]) {}
+    constructor(public id: string, public stageDir: string, public name: string, public rooms: number[]) {}
 
     public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         const dataFetcher = context.dataFetcher;
-        const paths = this.rooms.map((room) => makeElbPath(this.id, room));
+        const paths = this.rooms.map((room) => makeElbPath(this.stageDir, room));
         const promises: Promise<ArrayBufferSlice>[] = paths.map((path) => dataFetcher.fetchData(path));
         return Promise.all(promises).then((buffers: ArrayBufferSlice[]) => {
             const stageRRESes = buffers.map((buffer) => BRRES.parse(buffer));
@@ -97,23 +101,16 @@ class ElebitsSceneDesc implements Viewer.SceneDesc {
     }
 }
 
-function range(start: number, count: number): number[] {
-    const L: number[] = [];
-    for (let i = start; i < start + count; i++)
-        L.push(i);
-    return L;
-}
-
 const id = "elb";
 const name = "Elebits";
 const sceneDescs: Viewer.SceneDesc[] = [
-    new ElebitsSceneDesc("stg01", "Mom and Dad's House", range(1, 18)),
-    new ElebitsSceneDesc("stg03", "The Town", [1]),
-    new ElebitsSceneDesc("stg02", "Amusement Park - Main Hub", [1, 5]),
-    new ElebitsSceneDesc("stg02", "Amusement Park - Castle", [2]),
-    new ElebitsSceneDesc("stg02", "Amusement Park - Entrance", [3, 6]),
-    new ElebitsSceneDesc("stg02", "Amusement Park - Space", [4]),
-    new ElebitsSceneDesc("stg04", "Tutorial", [1, 2]),
+    new ElebitsSceneDesc("stg01",  "stg01", "Mom and Dad's House", range(1, 18)),
+    new ElebitsSceneDesc("stg03",  "stg03", "The Town", [1]),
+    new ElebitsSceneDesc("stg02a", "stg02", "Amusement Park - Main Hub", [1, 5]),
+    new ElebitsSceneDesc("stg02b", "stg02", "Amusement Park - Castle", [2]),
+    new ElebitsSceneDesc("stg02c", "stg02", "Amusement Park - Entrance", [3, 6]),
+    new ElebitsSceneDesc("stg02d", "stg02", "Amusement Park - Space", [4]),
+    new ElebitsSceneDesc("stg04",  "stg04", "Tutorial", [1, 2]),
 ];
 
 export const sceneGroup: Viewer.SceneGroup = { id, name, sceneDescs };

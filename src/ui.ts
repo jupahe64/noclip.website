@@ -1,19 +1,23 @@
 
 // New UI system
 
-import * as Viewer from './viewer';
-import { assertExists, assert } from './util';
-import { CameraControllerClass, OrbitCameraController, FPSCameraController } from './Camera';
-import { Color, colorToCSS } from './Color';
-import { TextureHolder } from './TextureHolder';
-import { GITHUB_REVISION_URL, GITHUB_URL, GIT_SHORT_REVISION } from './BuildVersion';
-import { SaveManager, GlobalSaveManager, SaveStateLocation } from "./SaveManager";
-import { RenderStatistics } from './RenderStatistics';
-import InputManager from './InputManager';
-import { GlobalGrabManager } from './GrabManager';
+import * as Viewer from './viewer.js';
+import { assertExists, assert } from './util.js';
+import { CameraControllerClass, OrbitCameraController, FPSCameraController, OrthoCameraController, CameraController, Camera } from './Camera.js';
+import { Color, colorToCSS } from './Color.js';
+import { GITHUB_REVISION_URL, GITHUB_URL, GIT_SHORT_REVISION, IS_DEVELOPMENT } from './BuildVersion.js';
+import { SaveManager, GlobalSaveManager } from "./SaveManager.js";
+import { RenderStatistics } from './RenderStatistics.js';
+import { GlobalGrabManager } from './GrabManager.js';
+import { clamp, invlerp, lerp, MathConstants } from './MathHelpers.js';
+import { DebugFloaterHolder } from './DebugFloaters.js';
+import { DraggingMode } from './InputManager.js';
+import { CLAPBOARD_ICON, StudioPanel } from './Studio.js';
+import { SceneDesc, SceneGroup } from './SceneBase.js';
 
 // @ts-ignore
-import logoURL from './logo.png';
+import logoURL from './assets/logo.png';
+import { AntialiasingMode } from './gfx/helpers/RenderGraphHelpers.js';
 
 export const HIGHLIGHT_COLOR = 'rgb(210, 30, 30)';
 export const COOL_BLUE_COLOR = 'rgb(20, 105, 215)';
@@ -23,19 +27,36 @@ export function createDOMFromString(s: string): DocumentFragment {
     return document.createRange().createContextualFragment(s);
 }
 
+enum FontelloIcon {
+    share = '\ue800',
+    resize_full = '\ue801',
+    pause = '\ue802',
+    resize_small = '\ue803',
+    play = '\ue804',
+    fast_backward = '\ue805',
+};
+
+function setFontelloIcon(elem: HTMLElement, icon: FontelloIcon): void {
+    elem.style.fontFamily = 'fontello';
+    elem.textContent = icon;
+}
+
 const OPEN_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 2 92 92" height="20" fill="white"><path d="M84.3765045,45.2316481 L77.2336539,75.2316205 L77.2336539,75.2316205 C77.1263996,75.6820886 76.7239081,76 76.2608477,76 L17.8061496,76 C17.2538649,76 16.8061496,75.5522847 16.8061496,75 C16.8061496,74.9118841 16.817796,74.8241548 16.8407862,74.739091 L24.7487983,45.4794461 C24.9845522,44.607157 25.7758952,44.0012839 26.6794815,44.0012642 L83.4036764,44.0000276 L83.4036764,44.0000276 C83.9559612,44.0000156 84.4036862,44.4477211 84.4036982,45.0000058 C84.4036999,45.0780163 84.3945733,45.155759 84.3765045,45.2316481 L84.3765045,45.2316481 Z M15,24 L26.8277004,24 L26.8277004,24 C27.0616369,24 27.2881698,24.0820162 27.4678848,24.2317787 L31.799078,27.8411064 L31.799078,27.8411064 C32.697653,28.5899189 33.8303175,29 35,29 L75,29 C75.5522847,29 76,29.4477153 76,30 L76,38 L76,38 C76,38.5522847 75.5522847,39 75,39 L25.3280454,39 L25.3280454,39 C23.0690391,39 21.0906235,40.5146929 20.5012284,42.6954549 L14.7844016,63.8477139 L14.7844016,63.8477139 C14.7267632,64.0609761 14.5071549,64.1871341 14.2938927,64.1294957 C14.1194254,64.0823423 13.9982484,63.9240598 13.9982563,63.7433327 L13.9999561,25 L14,25 C14.0000242,24.4477324 14.4477324,24.0000439 15,24.0000439 L15,24 Z"/></svg>`;
-const SEARCH_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 26.25" height="20" fill="white"><path d="M8.6953,14.3916 C5.5543,14.3916 3.0003,11.8356 3.0003,8.6956 C3.0003,5.5546 5.5543,2.9996 8.6953,2.9996 C11.8363,2.9996 14.3913,5.5546 14.3913,8.6956 C14.3913,11.8356 11.8363,14.3916 8.6953,14.3916 L8.6953,14.3916 Z M15.8423,13.7216 L15.6073,13.9566 C16.7213,12.4956 17.3913,10.6756 17.3913,8.6956 C17.3913,3.8936 13.4983,-0.0004 8.6953,-0.0004 C3.8933,-0.0004 0.0003,3.8936 0.0003,8.6956 C0.0003,13.4976 3.8933,17.3916 8.6953,17.3916 C10.6753,17.3916 12.4953,16.7216 13.9573,15.6076 L13.7213,15.8426 L18.3343,20.4546 L20.4553,18.3336 L15.8423,13.7216 Z"/></svg>`;
-const SAVE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 116 116" height="20" fill="white"><path fill="none" d="M35.763,37.954l30.977-0.021c2.118-0.001,4.296-2.033,4.296-4.15l-0.017-24.37L31.642,9.442l0.016,24.368   C31.658,35.928,33.645,37.955,35.763,37.954z M56.121,13.159l8.078-0.004c1.334-0.003,2.41,1.076,2.413,2.407l0.011,16.227   c-0.001,1.331-1.078,2.412-2.409,2.412l-8.082,0.005c-1.329,0.003-2.408-1.077-2.41-2.408l-0.01-16.23   C53.71,14.24,54.788,13.159,56.121,13.159z"/><path fill="none" d="M76.351,49.009H23.647c-2.457,0-4.449,2.079-4.449,4.644v34.044h61.605V53.652   C80.802,51.088,78.81,49.009,76.351,49.009z"/><path d="M56.132,34.206l8.082-0.005c1.331,0,2.408-1.081,2.409-2.412l-0.011-16.227c-0.003-1.331-1.08-2.411-2.413-2.407   l-8.078,0.004c-1.333,0-2.411,1.081-2.41,2.409l0.01,16.23C53.724,33.129,54.803,34.208,56.132,34.206z"/><path d="M92.756,22.267c-0.002-1.555-0.376-2.831-1.378-3.83c-0.645-0.644-7.701-7.692-11.327-11.318   c-1.279-1.271-3.68-2.121-5.468-2.12c-1.789,0.001-60.258,0.04-60.258,0.04C10.387,5.044,7.198,8.236,7.2,12.172l0.051,75.703   c0.003,3.939,3.197,7.126,7.134,7.125l71.29-0.048c3.937-0.001,7.127-3.197,7.126-7.131C92.8,87.82,92.756,23.228,92.756,22.267z    M71.019,9.414l0.017,24.37c0,2.117-2.178,4.148-4.296,4.15l-30.977,0.021c-2.117,0.001-4.104-2.026-4.104-4.144L31.642,9.442   L71.019,9.414z M80.802,87.697H19.198V53.652c0-2.564,1.992-4.644,4.449-4.644h52.704c2.459,0,4.451,2.079,4.451,4.644V87.697z"/></svg>`;
+export const SEARCH_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 26.25" height="20" fill="white"><path d="M8.6953,14.3916 C5.5543,14.3916 3.0003,11.8356 3.0003,8.6956 C3.0003,5.5546 5.5543,2.9996 8.6953,2.9996 C11.8363,2.9996 14.3913,5.5546 14.3913,8.6956 C14.3913,11.8356 11.8363,14.3916 8.6953,14.3916 L8.6953,14.3916 Z M15.8423,13.7216 L15.6073,13.9566 C16.7213,12.4956 17.3913,10.6756 17.3913,8.6956 C17.3913,3.8936 13.4983,-0.0004 8.6953,-0.0004 C3.8933,-0.0004 0.0003,3.8936 0.0003,8.6956 C0.0003,13.4976 3.8933,17.3916 8.6953,17.3916 C10.6753,17.3916 12.4953,16.7216 13.9573,15.6076 L13.7213,15.8426 L18.3343,20.4546 L20.4553,18.3336 L15.8423,13.7216 Z"/></svg>`;
 const TEXTURES_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" height="20" fill="white"><path d="M143.5,143.5v300h300v-300H143.5z M274.8,237.2c10.3,0,18.7,8.4,18.7,18.9c0,10.3-8.4,18.7-18.7,18.7   c-10.3,0-18.7-8.4-18.7-18.7C256,245.6,264.4,237.2,274.8,237.2z M406,406H181v-56.2l56.2-56.1l37.5,37.3l75-74.8l56.2,56.1V406z"/><polygon points="387.2,68.6 68.5,68.6 68.5,368.5 106,368.5 106,106 387.2,106"/></svg>`;
 const FRUSTUM_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" height="20" fill="white"><polygon points="48.2573,19.8589 33.8981,15.0724 5,67.8384 48.2573,90.3684" /><polygon points="51.5652,19.8738 51.5652,90.3734 95,67.8392 65.9366,15.2701" /><polygon points="61.3189,13.2756 49.9911,9.6265 38.5411,13.1331 49.9213,16.9268" /></svg>`;
 const STATISTICS_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 0 55 60" height="16" fill="white"><g><polygon points="6.9,11.5 6.9,56 55.4,56 55.4,53 9.9,53 9.9,11.5"/><path d="M52.7,15.8c-2.7,0-4.9,2.2-4.9,4.9c0,1,0.3,1.8,0.8,2.6l-5,6.8c-0.4-0.1-0.9-0.2-1.3-0.2c-1.5,0-2.9,0.7-3.8,1.8l-5.6-2.8   c0-0.2,0.1-0.5,0.1-0.8c0-2.7-2.2-4.9-4.9-4.9s-4.9,2.2-4.9,4.9c0,1.1,0.3,2,0.9,2.8l-3.9,5.1c-0.5-0.2-1.1-0.3-1.7-0.3   c-2.7,0-4.9,2.2-4.9,4.9s2.2,4.9,4.9,4.9s4.9-2.2,4.9-4.9c0-1-0.3-2-0.8-2.7l4-5.2c0.5,0.2,1.1,0.3,1.6,0.3c1.4,0,2.6-0.6,3.5-1.5   l5.8,2.9c0,0.1,0,0.2,0,0.3c0,2.7,2.2,4.9,4.9,4.9c2.7,0,4.9-2.2,4.9-4.9c0-1.2-0.4-2.2-1.1-3.1l4.8-6.5c0.6,0.2,1.2,0.4,1.9,0.4   c2.7,0,4.9-2.2,4.9-4.9S55.4,15.8,52.7,15.8z"/></g></svg>`;
 const ABOUT_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" height="16" fill="white"><path d="M50,1.1C23,1.1,1.1,23,1.1,50S23,98.9,50,98.9C77,98.9,98.9,77,98.9,50S77,1.1,50,1.1z M55.3,77.7c0,1.7-1.4,3.1-3.1,3.1  h-7.9c-1.7,0-3.1-1.4-3.1-3.1v-5.1c0-1.7,1.4-3.1,3.1-3.1h7.9c1.7,0,3.1,1.4,3.1,3.1V77.7z M67.8,47.3c-2.1,2.9-4.7,5.2-7.9,6.9  c-1.8,1.2-3,2.4-3.6,3.8c-0.4,0.9-0.7,2.1-0.9,3.5c-0.1,1.1-1.1,1.9-2.2,1.9h-9.7c-1.3,0-2.3-1.1-2.2-2.3c0.2-2.7,0.9-4.8,2-6.4  c1.4-1.9,3.9-4.2,7.5-6.7c1.9-1.2,3.3-2.6,4.4-4.3c1.1-1.7,1.6-3.7,1.6-6c0-2.3-0.6-4.2-1.9-5.6c-1.3-1.4-3-2.1-5.3-2.1  c-1.9,0-3.4,0.6-4.7,1.7c-0.8,0.7-1.3,1.6-1.6,2.8c-0.4,1.4-1.7,2.3-3.2,2.3l-9-0.2c-1.1,0-2-1-1.9-2.1c0.3-4.8,2.2-8.4,5.5-11  c3.8-2.9,8.7-4.4,14.9-4.4c6.6,0,11.8,1.7,15.6,5c3.8,3.3,5.7,7.8,5.7,13.5C70.9,41.2,69.8,44.4,67.8,47.3z"/></svg>`;
+const DICE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="18" height="18" fill="white"><path d="M 12.161286,0.33596185 C 9.1715371,-0.03245869 6.4678746,2.0779729 6.099454,5.0677219 L 0.33596183,51.838714 c -0.36842076,2.989751 1.74201117,5.693411 4.73176007,6.061832 l 46.7709931,5.763492 c 2.98975,0.368421 5.69341,-1.742009 6.061831,-4.73176 L 63.664038,12.161286 C 64.032459,9.171537 61.922029,6.4678748 58.932279,6.0994541 Z M 20.047281,10.438667 a 5.4374807,5.4374806 7.0250241 0 1 4.731761,6.061832 5.4374807,5.4374806 7.0250241 0 1 -6.061833,4.73176 5.4374807,5.4374806 7.0250241 0 1 -4.73176,-6.061832 5.4374807,5.4374806 7.0250241 0 1 6.061832,-4.73176 z m 28.782293,3.546782 a 5.4374807,5.4374806 7.0250241 0 1 4.731295,6.061775 5.4374807,5.4374806 7.0250241 0 1 -6.061367,4.731817 5.4374807,5.4374806 7.0250241 0 1 -4.731761,-6.061832 5.4374807,5.4374806 7.0250241 0 1 6.061833,-4.73176 z M 32.665036,26.603204 a 5.4374807,5.4374806 7.0250241 0 1 4.731295,6.061775 5.4374807,5.4374806 7.0250241 0 1 -6.06131,4.731351 5.4374807,5.4374806 7.0250241 0 1 -4.731817,-6.061366 5.4374807,5.4374806 7.0250241 0 1 6.061832,-4.73176 z M 16.500499,39.220959 a 5.4374807,5.4374806 7.0250241 0 1 4.731761,6.061833 5.4374807,5.4374806 7.0250241 0 1 -6.061776,4.731295 5.4374807,5.4374806 7.0250241 0 1 -4.731817,-6.061367 5.4374807,5.4374806 7.0250241 0 1 6.061832,-4.731761 z m 28.782293,3.546782 a 5.4374807,5.4374806 7.0250241 0 1 4.731295,6.061776 5.4374807,5.4374806 7.0250241 0 1 -6.06131,4.731353 5.4374807,5.4374806 7.0250241 0 1 -4.731818,-6.061368 5.4374807,5.4374806 7.0250241 0 1 6.061833,-4.731761 z"/></svg>`;
 
 // Custom icons used by game-specific panels.
 export const LAYER_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" height="20" fill="white"><g transform="translate(0,-1036.3622)"><path d="m 8,1039.2486 -0.21875,0.125 -4.90625,2.4375 5.125,2.5625 5.125,-2.5625 L 8,1039.2486 z m -3,4.5625 -2.125,0.9688 5.125,2.5625 5.125,-2.5625 -2.09375,-0.9688 -3.03125,1.5 -1,-0.5 -0.90625,-0.4375 L 5,1043.8111 z m 0,3 -2.125,0.9688 5.125,2.5625 5.125,-2.5625 -2.09375,-0.9688 -3.03125,1.5 -1,-0.5 -0.90625,-0.4375 L 5,1046.8111 z"/></g></svg>`;
 export const TIME_OF_DAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" height="20" fill="white"><path d="M50,93.4C74,93.4,93.4,74,93.4,50C93.4,26,74,6.6,50,6.6C26,6.6,6.6,26,6.6,50C6.6,74,26,93.4,50,93.4z M37.6,22.8  c-0.6,2.4-0.9,5-0.9,7.6c0,18.2,14.7,32.9,32.9,32.9c2.6,0,5.1-0.3,7.6-0.9c-4.7,10.3-15.1,17.4-27.1,17.4  c-16.5,0-29.9-13.4-29.9-29.9C20.3,37.9,27.4,27.5,37.6,22.8z"/></svg>`;
 export const RENDER_HACKS_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 110 105" height="20" fill="white"><path d="M95,5v60H65c0-16.6-13.4-30-30-30V5H95z"/><path d="M65,65c0,16.6-13.4,30-30,30C18.4,95,5,81.6,5,65c0-16.6,13.4-30,30-30v30H65z"/></svg>`;
 export const SAND_CLOCK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" height="20" fill="white"><g><path d="M79.3,83.3h-6.2H24.9h-6.2c-1.7,0-3,1.3-3,3s1.3,3,3,3h60.6c1.7,0,3-1.3,3-3S81,83.3,79.3,83.3z"/><path d="M18.7,14.7h6.2h48.2h6.2c1.7,0,3-1.3,3-3s-1.3-3-3-3H18.7c-1.7,0-3,1.3-3,3S17,14.7,18.7,14.7z"/><path d="M73.1,66c0-0.9-0.4-1.8-1.1-2.4L52.8,48.5L72,33.4c0.7-0.6,1.1-1.4,1.1-2.4V20.7H24.9V31c0,0.9,0.4,1.8,1.1,2.4l19.1,15.1   L26,63.6c-0.7,0.6-1.1,1.4-1.1,2.4v11.3h48.2V66z"/></g></svg>';
+export const VR_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" height="20" fill="white"><g><path d="M29,8H3A1,1,0,0,0,2,9V23a1,1,0,0,0,1,1H13a1,1,0,0,0,1-.83l.66-4A1.36,1.36,0,0,1,16,18a1.38,1.38,0,0,1,1.36,1.26L18,23.17A1,1,0,0,0,19,24H29a1,1,0,0,0,1-1V9A1,1,0,0,0,29,8ZM8.5,19A3.5,3.5,0,1,1,12,15.5,3.5,3.5,0,0,1,8.5,19Zm15,0A3.5,3.5,0,1,1,27,15.5,3.5,3.5,0,0,1,23.5,19Z"/></g></svg>`;
+export const CUTSCENE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 142.448 142.448" height="20" fill="white"><g><path d="M142.411,68.9C141.216,31.48,110.968,1.233,73.549,0.038c-20.361-0.646-39.41,7.104-53.488,21.639 C6.527,35.65-0.584,54.071,0.038,73.549c1.194,37.419,31.442,67.667,68.861,68.861c0.779,0.025,1.551,0.037,2.325,0.037 c19.454,0,37.624-7.698,51.163-21.676C135.921,106.799,143.033,88.377,142.411,68.9z M111.613,110.336 c-10.688,11.035-25.032,17.112-40.389,17.112c-0.614,0-1.228-0.01-1.847-0.029c-29.532-0.943-53.404-24.815-54.348-54.348 c-0.491-15.382,5.122-29.928,15.806-40.958c10.688-11.035,25.032-17.112,40.389-17.112c0.614,0,1.228,0.01,1.847,0.029 c29.532,0.943,53.404,24.815,54.348,54.348C127.91,84.76,122.296,99.306,111.613,110.336z"></path> <path d="M94.585,67.086L63.001,44.44c-3.369-2.416-8.059-0.008-8.059,4.138v45.293 c0,4.146,4.69,6.554,8.059,4.138l31.583-22.647C97.418,73.331,97.418,69.118,94.585,67.086z"></path> </g></svg>`
+export const EYE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M15.0007 12C15.0007 13.6569 13.6576 15 12.0007 15C10.3439 15 9.00073 13.6569 9.00073 12C9.00073 10.3431 10.3439 9 12.0007 9C13.6576 9 15.0007 10.3431 15.0007 12Z" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12.0012 5C7.52354 5 3.73326 7.94288 2.45898 12C3.73324 16.0571 7.52354 19 12.0012 19C16.4788 19 20.2691 16.0571 21.5434 12C20.2691 7.94291 16.4788 5 12.0012 5Z" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 export function setChildren(parent: Element, children: Element[]): void {
     // We want to swap children around without removing them, since removing them will cause
@@ -64,7 +85,11 @@ export function setChildren(parent: Element, children: Element[]): void {
             parent.insertBefore(children[i], parent.children.item(i));
 }
 
-function setElementHighlighted(elem: HTMLElement, highlighted: boolean, normalTextColor: string = '') {
+function setElementVisible(elem: HTMLElement, v: boolean, normalDisplay = 'block') {
+    elem.style.display = v ? normalDisplay : 'none';
+}
+
+export function setElementHighlighted(elem: HTMLElement, highlighted: boolean, normalTextColor: string = '') {
     if (highlighted) {
         elem.style.backgroundColor = HIGHLIGHT_COLOR;
         elem.style.color = 'black';
@@ -87,17 +112,11 @@ export interface Widget {
     elem: HTMLElement;
 }
 
-declare global {
-    interface CSSStyleDeclaration {
-        caretColor: string;
-    }
-}
-
 function svgStringToCSSBackgroundImage(svgString: string) {
     return `url(data:image/svg+xml,${encodeURI(svgString)})`;
 }
 
-class TextField implements Widget {
+export class TextField implements Widget {
     public textarea: HTMLInputElement;
     public elem: HTMLElement;
 
@@ -115,6 +134,7 @@ class TextField implements Widget {
 
     public selectAll() {
         this.textarea.setSelectionRange(0, this.textarea.value.length);
+        this.textarea.scrollLeft = 0;
     }
 
     public getValue() {
@@ -133,6 +153,7 @@ class TextField implements Widget {
 export class TextEntry implements Widget {
     public elem: HTMLElement;
     public ontext: ((string: string) => void) | null = null;
+    public onfocus: (() => void) | null = null;
 
     protected toplevel: HTMLElement;
     public textfield: TextField;
@@ -145,6 +166,7 @@ export class TextEntry implements Widget {
 
         this.textfield = new TextField();
         const textarea = this.textfield.textarea;
+        textarea.title = 'Search Bar';
         textarea.style.boxSizing = 'border-box';
         textarea.style.padding = '12px';
         textarea.style.paddingLeft = '32px';
@@ -159,12 +181,16 @@ export class TextEntry implements Widget {
         };
         textarea.oninput = () => {
             this.textChanged();
-            this.syncClearButtonVisible();
+        };
+        textarea.onfocus = () => {
+            if (this.onfocus !== null)
+                this.onfocus();
         };
         this.toplevel.appendChild(this.textfield.elem);
 
         this.clearButton = document.createElement('div');
         this.clearButton.textContent = '🗙';
+        this.clearButton.title = 'Clear';
         this.clearButton.style.color = 'white';
         this.clearButton.style.position = 'absolute';
         this.clearButton.style.width = '24px';
@@ -201,27 +227,28 @@ export class TextEntry implements Widget {
     public setIcon(icon: string): void {
         this.textfield.textarea.style.backgroundImage = svgStringToCSSBackgroundImage(icon);
     }
-    
+
     public setPlaceholder(placeholder: string): void {
         this.textfield.setPlaceholder(placeholder);
     }
 }
 
-export const enum ScrollSelectItemType {
+export enum ScrollSelectItemType {
     Selectable, Header,
 }
 
 interface ScrollSelectItemHeader {
     type: ScrollSelectItemType.Header;
     visible?: boolean;
-    html: string;
+    name?: string;
+    html?: HTMLElement;
 }
 
 interface ScrollSelectItemSelectable {
     type: ScrollSelectItemType.Selectable;
     visible?: boolean;
     name?: string;
-    html?: string;
+    html?: HTMLElement;
 }
 
 export type ScrollSelectItem = ScrollSelectItemHeader | ScrollSelectItemSelectable;
@@ -240,12 +267,15 @@ export abstract class ScrollSelect implements Widget {
 
         this.scrollContainer = document.createElement('div');
         this.setHeight(`200px`);
+        this.setTextSelectable(false);
         this.scrollContainer.style.overflow = 'auto';
-        this.scrollContainer.style.userSelect = 'none';
-        this.scrollContainer.style.webkitUserSelect = 'none';
         this.toplevel.appendChild(this.scrollContainer);
 
         this.elem = this.toplevel;
+    }
+
+    public setTextSelectable(v: boolean): void {
+        this.scrollContainer.style.userSelect = v ? '' : 'none'
     }
 
     public setHeight(height: string): void {
@@ -269,9 +299,23 @@ export abstract class ScrollSelect implements Widget {
         }
     }
 
+    public scrollItemIntoView(i: number): boolean {
+        const outer = this.getOuterForIndex(i);
+        if (!this.itemIsVisible(outer))
+            return false;
+        const selector = outer.querySelector('.selector') as HTMLElement;
+        if (selector) {
+            outer.scrollIntoView();
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     public setItems(items: ScrollSelectItem[]): void {
         this.scrollContainer.style.display = (items.length > 0) ? '' : 'none';
-        this.scrollContainer.innerHTML = '';
+        while (this.scrollContainer.firstChild)
+            this.scrollContainer.removeChild(this.scrollContainer.firstChild);
         let hasHeader = false;
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
@@ -284,16 +328,18 @@ export abstract class ScrollSelect implements Widget {
 
             if (item.type === ScrollSelectItemType.Selectable) {
                 outer.style.cursor = 'pointer';
-                outer.style.paddingLeft = hasHeader ? '20px' : '';
+                outer.style.paddingLeft = hasHeader ? '24px' : '';
 
                 const selector = document.createElement('div');
                 selector.classList.add('selector');
                 selector.style.display = 'list-item';
+                selector.style.lineHeight = '24px';
+                selector.style.textShadow = `0 0 8px black`;
                 outer.appendChild(selector);
                 const textSpan = document.createElement('span');
                 textSpan.classList.add('text');
                 if (item.html !== undefined)
-                    textSpan.innerHTML = item.html;
+                    textSpan.appendChild(item.html);
                 else if (item.name !== undefined)
                     textSpan.textContent = item.name;
                 else
@@ -315,6 +361,8 @@ export abstract class ScrollSelect implements Widget {
                     this.isDragging = false;
                 };
                 outer.onmouseover = (e) => {
+                    if (e.buttons === 0)
+                        this.isDragging = false;
                     if (this.isDragging)
                         outer.focus();
                 };
@@ -322,7 +370,16 @@ export abstract class ScrollSelect implements Widget {
                 const textSpan = document.createElement('span');
                 textSpan.classList.add('header');
                 textSpan.style.fontWeight = 'bold';
-                textSpan.innerHTML = item.html;
+                textSpan.style.lineHeight = `36px`;
+                textSpan.style.textShadow = `0 0 8px black`;
+                textSpan.style.paddingLeft = `8px`;
+                textSpan.style.verticalAlign = `baseline`;
+                if (item.html !== undefined)
+                    textSpan.appendChild(item.html);
+                else if (item.name !== undefined)
+                    textSpan.textContent = item.name;
+                else
+                    throw "whoops";
                 outer.appendChild(textSpan);
                 hasHeader = true;
             }
@@ -444,7 +501,7 @@ export abstract class ScrollSelect implements Widget {
     protected abstract itemFocused(index: number, first: boolean): void;
 }
 
-function ensureFlairIndex(flairs: Flair[], index: number): Flair {
+export function ensureFlairIndex(flairs: Flair[], index: number): Flair {
     const flairIndex = flairs.findIndex((f) => f.index === index);
     if (flairIndex >= 0) {
         flairs[flairIndex] = Object.assign({}, flairs[flairIndex]);
@@ -499,7 +556,12 @@ export class SingleSelect extends ScrollSelect {
         return true;
     }
 
-    public setItems(items: ScrollSelectItem[]): void {
+    public scrollFocus(): void {
+        if (this.highlightedIndex !== -1)
+            this.scrollItemIntoView(this.highlightedIndex);
+    }
+
+    public override setItems(items: ScrollSelectItem[]): void {
         this.highlightedIndex = -1;
         super.setItems(items);
     }
@@ -525,7 +587,6 @@ export class SingleSelect extends ScrollSelect {
         if (this.setHighlightFlair && this.highlightedIndex >= 0) {
             const flair = ensureFlairIndex(flairs, this.highlightedIndex);
             flair.background = HIGHLIGHT_COLOR;
-            flair.color = 'black';
             flair.fontWeight = 'bold';
         }
         this.setInternalFlairs(flairs);
@@ -549,6 +610,7 @@ export class MultiSelect extends ScrollSelect {
     cursor: pointer;
     background: #666;
     font-weight: bold;
+    user-select: none;
 }
 </style>
 <div class="AllButton">All</div><div class="NoneButton">None</div>
@@ -690,7 +752,7 @@ export class Panel implements Widget {
         this.toplevel.style.overflow = 'hidden';
         this.toplevel.style.display = 'grid';
         this.toplevel.style.gridAutoFlow = 'column';
-        this.toplevel.style.gridGap = '20px';
+        this.toplevel.style.gap = '20px';
         this.toplevel.style.transition = '.25s ease-out';
         this.toplevel.style.alignItems = 'start';
         this.toplevel.style.outline = 'none';
@@ -707,7 +769,7 @@ export class Panel implements Widget {
 
         this.extraRack = document.createElement('div');
         this.extraRack.style.gridAutoFlow = 'column';
-        this.extraRack.style.gridGap = '20px';
+        this.extraRack.style.gap = '20px';
         this.extraRack.style.transition = '.15s ease-out .10s';
         this.toplevel.appendChild(this.extraRack);
 
@@ -716,13 +778,11 @@ export class Panel implements Widget {
 
         this.header = document.createElement('h1');
         this.header.style.lineHeight = '28px';
-        this.header.style.width = '400px';
+        this.header.style.width = '440px';
         this.header.style.margin = '0';
         this.header.style.fontSize = '100%';
-        this.header.style.textAlign = 'center';
         this.header.style.cursor = 'pointer';
         this.header.style.userSelect = 'none';
-        this.header.style.webkitUserSelect = 'none';
         this.header.style.display = 'grid';
         this.header.style.gridTemplateColumns = '28px 1fr';
         this.header.style.alignItems = 'center';
@@ -739,7 +799,7 @@ export class Panel implements Widget {
         this.headerContainer.appendChild(this.header);
 
         this.contents = document.createElement('div');
-        this.contents.style.width = '400px';
+        this.contents.style.width = '440px';
         this.mainPanel.appendChild(this.contents);
 
         this.elem = this.toplevel;
@@ -755,7 +815,7 @@ export class Panel implements Widget {
 
     private syncSize() {
         const widthExpanded = this.expanded || this.mainPanel.matches(':hover');
-        this.mainPanel.style.width = widthExpanded ? '400px' : '28px';
+        this.mainPanel.style.width = widthExpanded ? '440px' : '28px';
 
         const heightExpanded = this.expanded;
         if (heightExpanded) {
@@ -808,10 +868,10 @@ export class Panel implements Widget {
         return true;
     }
 
-    public setExpanded(v: boolean) {
+    public setExpanded(v: boolean, focus: boolean = true) {
         this.manuallyExpanded = v;
         this.syncExpanded();
-        if (this.expanded)
+        if (this.expanded && focus)
             this.elem.focus();
     }
 
@@ -828,115 +888,7 @@ export class Panel implements Widget {
             // If we're coming back from auto-closing, then start a timeout to ignore clicks during this time.
             this.ignoreAutoCloseTimeout = window.setTimeout(() => {
                 this.ignoreAutoCloseTimeout = 0;
-            }, 1000);
-        }
-    }
-}
-
-export class FloatingPanel implements Widget {
-    public elem: HTMLElement;
-
-    public customHeaderBackgroundColor: string = '';
-    protected header: HTMLElement;
-    protected headerContainer: HTMLElement;
-    protected svgIcon: SVGSVGElement;
-
-    private toplevel: HTMLElement;
-    public mainPanel: HTMLElement;
-    public contents: HTMLElement;
-
-    constructor() {
-        this.toplevel = document.createElement('div');
-        this.toplevel.style.color = 'white';
-        this.toplevel.style.font = '16px monospace';
-        this.toplevel.style.overflow = 'hidden';
-        this.toplevel.style.display = 'grid';
-        this.toplevel.style.gridAutoFlow = 'column';
-        this.toplevel.style.gridGap = '20px';
-        this.toplevel.style.alignItems = 'start';
-        this.toplevel.style.outline = 'none';
-        this.toplevel.style.minWidth = '300px';
-        this.toplevel.style.position = 'absolute';
-        this.toplevel.style.left = '20px';
-        this.toplevel.style.top = '20px';
-        this.toplevel.tabIndex = -1;
-
-        this.mainPanel = document.createElement('div');
-        this.mainPanel.style.overflow = 'hidden';
-        this.mainPanel.style.transition = '.25s ease-out';
-        this.mainPanel.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
-        this.toplevel.appendChild(this.mainPanel);
-
-        this.headerContainer = document.createElement('div');
-        this.mainPanel.appendChild(this.headerContainer);
-
-        this.header = document.createElement('h1');
-        this.header.style.lineHeight = '28px';
-        this.header.style.margin = '0';
-        this.header.style.fontSize = '100%';
-        this.header.style.textAlign = 'center';
-        this.header.style.cursor = 'pointer';
-        this.header.style.userSelect = 'none';
-        this.header.style.webkitUserSelect = 'none';
-        this.header.style.display = 'grid';
-        this.header.style.gridTemplateColumns = '28px 1fr';
-        this.header.style.alignItems = 'center';
-        this.header.style.justifyItems = 'center';
-        this.header.style.gridAutoFlow = 'column';
-        this.header.addEventListener('mousedown', (e) => {
-            GlobalGrabManager.takeGrab(this, e, { takePointerLock: false });
-        });
-
-        this.headerContainer.appendChild(this.header);
-
-        this.contents = document.createElement('div');
-        this.contents.style.maxHeight = '50vh';
-        this.contents.style.overflow = 'auto';
-        this.mainPanel.appendChild(this.contents);
-
-        this.setWidth(400);
-
-        this.elem = this.toplevel;
-    }
-
-    public setWidth(v: number): void {
-        this.header.style.width = `${v}px`;
-        this.contents.style.width = `${v}px`;
-    }
-
-    public destroy(): void {
-        this.toplevel.parentElement.removeChild(this.toplevel);
-    }
-
-    public onMotion(dx: number, dy: number): void {
-        this.toplevel.style.left = (parseFloat(this.toplevel.style.left) + dx) + 'px';
-        this.toplevel.style.top = (parseFloat(this.toplevel.style.top) + dy) + 'px';
-    }
-
-    public onGrabReleased(): void {
-    }
-
-    public setVisible(v: boolean) {
-        this.toplevel.style.display = v ? 'grid' : 'none';
-    }
-
-    public setTitle(icon: string, title: string) {
-        this.svgIcon = createDOMFromString(icon).querySelector('svg')!;
-        this.svgIcon.style.gridColumn = '1';
-        this.header.textContent = title;
-        this.header.appendChild(this.svgIcon);
-        this.toplevel.dataset.title = title;
-        this.syncHeaderStyle();
-    }
-
-    protected syncHeaderStyle() {
-        if (this.customHeaderBackgroundColor) {
-            this.svgIcon.style.fill = '';
-            this.header.style.backgroundColor = this.customHeaderBackgroundColor;
-            this.header.style.color = 'white';
-        } else {
-            this.svgIcon.style.fill = 'black';
-            setElementHighlighted(this.header, true, HIGHLIGHT_COLOR);
+            }, 250);
         }
     }
 }
@@ -959,57 +911,95 @@ function matchRegExps(n: RegExp[], S: string): boolean {
     })
 }
 
+function randomChoice<T>(L: T[]): T {
+    const idx = Math.floor(Math.random() * L.length);
+    return assertExists(L[idx]);
+}
+
+interface SceneDatabase {
+    sceneGroups: (string | SceneGroup)[];
+    onchanged: (() => void) | null;
+}
+
 class SceneSelect extends Panel {
-    private sceneGroups: (string | Viewer.SceneGroup)[] = [];
-    private sceneDescs: (string | Viewer.SceneDesc)[] = [];
+    private sceneGroups: (string | SceneGroup)[] = [];
+    private sceneDescs: (string | SceneDesc)[] = [];
 
     private searchEntry: TextEntry;
+    private randomButton: HTMLElement;
     private sceneGroupList: SingleSelect;
     private sceneDescList: SingleSelect;
 
-    private selectedSceneGroup: Viewer.SceneGroup;
-    private currentSceneGroup: Viewer.SceneGroup;
-    private currentSceneDesc: Viewer.SceneDesc;
-    private loadProgress: number;
+    private selectedSceneGroup: SceneGroup;
+    private currentSceneGroup: SceneGroup;
+    private currentSceneDesc: SceneDesc;
+    private forceVisible: boolean = IS_DEVELOPMENT;
 
     private currentSearchTokens: RegExp[] = [];
 
-    public onscenedescselected: (sceneGroup: Viewer.SceneGroup, sceneDesc: Viewer.SceneDesc) => void;
+    public loadProgress: number;
+    public onscenedescselected: (sceneDesc: SceneDesc) => void;
 
-    constructor(public viewer: Viewer.Viewer) {
+    constructor() {
         super();
         this.setTitle(OPEN_ICON, 'Games');
 
+        const topBox = document.createElement('div');
+        topBox.style.display = 'grid';
+        topBox.style.gridTemplateColumns = '1fr 40px';
+        topBox.style.background = 'rgba(0, 0, 0, 1.0)';
+        this.contents.append(topBox);
+
         this.searchEntry = new TextEntry();
-        this.searchEntry.elem.style.background = 'rgba(0, 0, 0, 1.0)';
         this.searchEntry.setIcon(SEARCH_ICON);
         this.searchEntry.setPlaceholder('Search...');
         this.searchEntry.ontext = (searchString: string) => {
             this._setSearchString(searchString);
         };
-        this.contents.appendChild(this.searchEntry.elem);
+        this.searchEntry.onfocus = () => {
+            // If the search entry manages to get itself focused (which can happen if the user hits Tab),
+            // then expand the panel.
+            this.setExpanded(true, false);
+            this.setAutoClosed(false);
+        };
+        topBox.appendChild(this.searchEntry.elem);
+
+        this.randomButton = document.createElement('div');
+        this.randomButton.title = 'Random';
+        this.randomButton.style.placeSelf = 'stretch';
+        this.randomButton.style.color = 'white';
+        this.randomButton.style.lineHeight = '20px';
+        this.randomButton.style.cursor = 'pointer';
+        this.randomButton.style.backgroundRepeat = 'no-repeat';
+        this.randomButton.style.backgroundPosition = 'center center';
+        this.randomButton.style.backgroundImage = svgStringToCSSBackgroundImage(DICE_ICON);
+        this.randomButton.onclick = () => {
+            this.selectRandom();
+        };
+        this.syncRandomButtonVisible();
+        topBox.appendChild(this.randomButton);
 
         this.sceneGroupList = new SingleSelect();
-        this.sceneGroupList.setHeight('300px');
+        this.sceneGroupList.setHeight('400px');
         this.contents.appendChild(this.sceneGroupList.elem);
 
         this.sceneDescList = new SingleSelect();
         this.sceneDescList.setHighlightFlair = false;
         this.sceneDescList.elem.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
         this.sceneDescList.elem.style.width = '500px';
-        this.sceneDescList.setHeight('372px');
+        this.sceneDescList.setHeight('472px');
         this.extraRack.appendChild(this.sceneDescList.elem);
 
         this.sceneGroupList.onselectionchange = (i: number) => {
-            this.selectSceneGroup(i);
+            this.selectSceneGroupIndex(i);
         };
 
         this.sceneDescList.onselectionchange = (i: number) => {
-            this.selectSceneDesc(i);
+            this.selectSceneDescIndex(i);
         };
     }
 
-    protected onKeyDown(e: KeyboardEvent): void {
+    protected override onKeyDown(e: KeyboardEvent): void {
         if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
             this.sceneGroupList.elem.onkeydown!(e);
         } else {
@@ -1034,12 +1024,20 @@ class SceneSelect extends Panel {
         this.syncVisibility();
     }
 
+    private syncRandomButtonVisible(): void {
+    }
+
+    public setForceVisible(v: boolean) {
+        this.forceVisible = v;
+        this.syncVisibility();
+    }
+
     private syncVisibility(): void {
         // Start searching!
         const n = this.currentSearchTokens;
 
         let lastDescHeaderVisible = false;
-        function matchSceneDesc(item: (string | Viewer.SceneDesc)): boolean {
+        function matchSceneDesc(item: (string | SceneDesc)): boolean {
             if (typeof item === 'string') {
                 // If this is a header, then all items under the header should match.
                 lastDescHeaderVisible = matchRegExps(n, item);
@@ -1063,14 +1061,16 @@ class SceneSelect extends Panel {
                 let visible = false;
                 let explicitlyInvisible = false;
 
-                explicitlyInvisible = item.sceneDescs.length <= 0 || item.hidden;
+                const isHidden = (!!item.hidden) && !this.forceVisible;
+                explicitlyInvisible = item.sceneDescs.length <= 0 || isHidden;
+
                 if (!explicitlyInvisible) {
                     // If header matches, then we are explicitly visible.
-                    if (!visible == lastGroupHeaderVisible)
+                    if (!visible === lastGroupHeaderVisible)
                         visible = true;
 
                     // If name matches, then we are explicitly visible.
-                    if (!visible && matchRegExps(n, item.name))
+                    if (!visible && (matchRegExps(n, item.name) || (item.altName && matchRegExps(n, item.altName))))
                         visible = true;
 
                     if (item === this.selectedSceneGroup)
@@ -1101,26 +1101,32 @@ class SceneSelect extends Panel {
         this.sceneDescList.computeHeaderVisibility();
     }
 
-    public setCurrentDesc(sceneGroup: Viewer.SceneGroup, sceneDesc: Viewer.SceneDesc) {
+    public setCurrentDesc(sceneGroup: SceneGroup, sceneDesc: SceneDesc) {
         this.selectedSceneGroup = sceneGroup;
         this.currentSceneGroup = sceneGroup;
         this.currentSceneDesc = sceneDesc;
-
-        const index = this.sceneGroups.indexOf(this.currentSceneGroup);
-        this.sceneGroupList.setHighlighted(index);
-
         this.syncSceneDescs();
+
+        this.sceneGroupList.setHighlighted(this.sceneGroups.indexOf(this.currentSceneGroup));
+        this.sceneDescList.setHighlighted(this.sceneDescs.indexOf(this.currentSceneDesc));
     }
 
-    public setSceneGroups(sceneGroups: (string | Viewer.SceneGroup)[]) {
+    private setSceneGroups(sceneGroups: (string | SceneGroup)[]) {
         this.sceneGroups = sceneGroups;
         this.sceneGroupList.setItems(sceneGroups.map((g): ScrollSelectItem => {
             if (typeof g === 'string')
-                return { type: ScrollSelectItemType.Header, html: g };
+                return { type: ScrollSelectItemType.Header, name: g };
             else
                 return { type: ScrollSelectItemType.Selectable, name: g.name };
         }));
         this.syncSceneDescs();
+    }
+
+    public setSceneDatabase(sceneDatabase: SceneDatabase): void {
+        this.setSceneGroups(sceneDatabase.sceneGroups);
+        sceneDatabase.onchanged = () => {
+            this.setSceneGroups(sceneDatabase.sceneGroups);
+        };
     }
 
     public setProgress(pct: number): void {
@@ -1129,8 +1135,23 @@ class SceneSelect extends Panel {
         this.syncHeaderStyle();
     }
 
-    private selectSceneDesc(i: number) {
-        this.onscenedescselected(this.selectedSceneGroup, this.sceneDescs[i] as Viewer.SceneDesc);
+    private selectSceneDesc(sceneDesc: SceneDesc) {
+        this.onscenedescselected(sceneDesc);
+    }
+
+    private selectSceneDescIndex(i: number) {
+        this.selectSceneDesc(this.sceneDescs[i] as SceneDesc);
+    }
+
+    private selectRandom(): void {
+        const sceneGroups = this.sceneGroups.filter((v) => typeof v !== 'string' && !v.hidden && v.sceneDescs.length > 0) as SceneGroup[];
+        this.selectSceneGroup(randomChoice(sceneGroups));
+
+        const sceneDescs = this.sceneDescs.filter((v) => typeof v !== 'string') as SceneDesc[];
+        this.selectSceneDesc(randomChoice(sceneDescs));
+
+        this.sceneGroupList.scrollFocus();
+        this.sceneDescList.scrollFocus();
     }
 
     private getLoadingGradient(rightColor: string) {
@@ -1138,7 +1159,7 @@ class SceneSelect extends Panel {
         return `linear-gradient(to right, ${HIGHLIGHT_COLOR} ${pct}, ${rightColor} ${pct})`;
     }
 
-    protected syncHeaderStyle() {
+    protected override syncHeaderStyle() {
         super.syncHeaderStyle();
 
         setElementHighlighted(this.header, !!this.expanded);
@@ -1164,7 +1185,6 @@ class SceneSelect extends Panel {
         if (selectedDescIndex >= 0) {
             const flair = ensureFlairIndex(sceneDescFlairs, selectedDescIndex);
             flair.background = this.getLoadingGradient('transparent');
-            flair.color = this.loadProgress > 0.5 ? 'black' : undefined;
             flair.fontWeight = 'bold';
             const pct = `${Math.round(this.loadProgress * 100)}%`;
             flair.extraHTML = this.loadProgress < 1.0 ? `<span style="font-weight: bold; color: #aaa">${pct}</span>` : ``;
@@ -1172,10 +1192,13 @@ class SceneSelect extends Panel {
         this.sceneDescList.setFlairs(sceneDescFlairs);
     }
 
-    private selectSceneGroup(i: number) {
-        const sceneGroup = this.sceneGroups[i];
-        this.selectedSceneGroup = sceneGroup as Viewer.SceneGroup;
+    private selectSceneGroup(sceneGroup: SceneGroup): void {
+        this.selectedSceneGroup = sceneGroup;
         this.syncSceneDescs();
+    }
+
+    private selectSceneGroupIndex(i: number) {
+        this.selectSceneGroup(this.sceneGroups[i] as SceneGroup);
     }
 
     private syncSceneDescs() {
@@ -1185,11 +1208,11 @@ class SceneSelect extends Panel {
             this.setSceneDescs([]);
     }
 
-    private setSceneDescs(sceneDescs: (string | Viewer.SceneDesc)[]) {
+    private setSceneDescs(sceneDescs: (string | SceneDesc)[]) {
         this.sceneDescs = sceneDescs;
         this.sceneDescList.setItems(sceneDescs.map((g): ScrollSelectItem => {
             if (typeof g === 'string')
-                return { type: ScrollSelectItemType.Header, html: g };
+                return { type: ScrollSelectItemType.Header, name: g };
             else
                 return { type: ScrollSelectItemType.Selectable, name: g.name };
         }));
@@ -1210,188 +1233,6 @@ function buildShareURL(saveState: string): string {
     return `${loc.origin}${loc.pathname}#${makeHashSafe(saveState)}`;
 }
 
-export const enum SaveStatesAction { Load, LoadDefault, Save, Delete };
-
-export class SaveStatesPanel extends Panel {
-    public currentShareURLEntry: TextField;
-    public currentSceneDescIdEntry: TextField;
-    private currentSceneDescId: string;
-    private stateButtonsHeader: HTMLElement;
-    private stateButtons: HTMLElement[] = [];
-    private defaultStateButtons: HTMLElement[] = [];
-
-    public onsavestatesaction: (action: SaveStatesAction, key: string) => void;
-
-    constructor(private inputManager: InputManager) {
-        super();
-
-        this.setTitle(SAVE_ICON, 'Save States and Sharing');
-
-        GlobalSaveManager.addSaveStateListener(this._onSaveStateChanged.bind(this));
-        this.inputManager.addListener(this._onKeyEvent.bind(this));
-
-        this.stateButtonsHeader = document.createElement('div');
-        this.stateButtonsHeader.style.fontWeight = 'bold';
-        this.contents.appendChild(this.stateButtonsHeader);
-
-        const stateButtons = document.createElement('div');
-        stateButtons.style.display = 'grid';
-        stateButtons.style.gridAutoFlow = 'column';
-        stateButtons.style.gridGap = '8px';
-        for (let i = 1; i <= 9; i++) {
-            const button = document.createElement('div');
-            button.textContent = '' + i;
-            button.style.textAlign = 'center';
-            button.style.lineHeight = '1.2em';
-            button.style.userSelect = 'none';
-            this.stateButtons.push(button);
-            stateButtons.appendChild(button);
-        }
-        this.contents.appendChild(stateButtons);
-
-        const defaultStateButtonsHeader = document.createElement('div');
-        defaultStateButtonsHeader.textContent = 'Load Default Save State';
-        defaultStateButtonsHeader.style.fontWeight = 'bold';
-        defaultStateButtonsHeader.style.marginTop = '1em';
-        this.contents.appendChild(defaultStateButtonsHeader);
-
-        const defaultStateButtons = document.createElement('div');
-        defaultStateButtons.style.display = 'grid';
-        defaultStateButtons.style.gridAutoFlow = 'column';
-        defaultStateButtons.style.gridGap = '8px';
-        for (let i = 1; i <= 9; i++) {
-            const button = document.createElement('div');
-            button.textContent = '' + i;
-            button.style.textAlign = 'center';
-            button.style.lineHeight = '1.2em';
-            button.style.userSelect = 'none';
-            this.defaultStateButtons.push(button);
-            defaultStateButtons.appendChild(button);
-        }
-        this.contents.appendChild(defaultStateButtons);
-
-        const shareURLHeader = document.createElement('div');
-        shareURLHeader.textContent = 'Share URL';
-        shareURLHeader.style.fontWeight = 'bold';
-        shareURLHeader.style.marginTop = '1em';
-        this.contents.appendChild(shareURLHeader);
-
-        this.currentShareURLEntry = new TextField();
-        this.currentShareURLEntry.textarea.readOnly = true;
-        this.currentShareURLEntry.textarea.onfocus = () => {
-            this.currentShareURLEntry.selectAll();
-        };
-        this.contents.appendChild(this.currentShareURLEntry.elem);
-
-        const sceneDescIdHeader = document.createElement('div');
-        sceneDescIdHeader.textContent = 'Internal Scene ID';
-        sceneDescIdHeader.style.fontWeight = 'bold';
-        sceneDescIdHeader.style.marginTop = '1em';
-        this.contents.appendChild(sceneDescIdHeader);
-
-        this.currentSceneDescIdEntry = new TextField();
-        this.currentSceneDescIdEntry.textarea.readOnly = true;
-        this.currentSceneDescIdEntry.textarea.onfocus = () => {
-            this.currentSceneDescIdEntry.selectAll();
-        };
-        this.contents.appendChild(this.currentSceneDescIdEntry.elem);
-
-        const helpText = document.createElement('div');
-        helpText.style.marginTop = '1em';
-        helpText.innerHTML = `
-Hold <b>Shift</b> to save new save states<br>
-Hold <b>Alt</b> to delete saves you made<br>
-Use <b>&lt;Num&gt;</b> on keyboard for quick access
-`.trim();
-        this.contents.appendChild(helpText);
-    }
-
-    public pickSaveStatesAction(inputManager: InputManager): SaveStatesAction {
-        if (inputManager.isKeyDown('ShiftLeft'))
-            return SaveStatesAction.Save;
-        else if (inputManager.isKeyDown('AltLeft'))
-            return SaveStatesAction.Delete;
-        else
-            return SaveStatesAction.Load;
-    }
-
-    private initLoadStateButton(button: HTMLElement, action: SaveStatesAction, saveManager: SaveManager, key: string): void {
-        let active = false;
-        if (action !== SaveStatesAction.LoadDefault && saveManager.hasStateInLocation(key, SaveStateLocation.LocalStorage)) {
-            button.style.backgroundColor = COOL_BLUE_COLOR;
-            button.style.fontWeight = 'bold';
-            button.style.color = '';
-            active = true;
-        } else if (action === SaveStatesAction.LoadDefault && saveManager.hasStateInLocation(key, SaveStateLocation.Defaults)) {
-            button.style.backgroundColor = '#8fa88f';
-            button.style.fontWeight = 'bold';
-            button.style.color = '';
-            active = true;
-        } else if (action === SaveStatesAction.Save) {
-            button.style.backgroundColor = '#666';
-            button.style.fontWeight = 'bold';
-            button.style.color = 'white';
-            active = true;
-        } else {
-            button.style.backgroundColor = '#333';
-            button.style.fontWeight = '';
-            button.style.color = '#aaa';
-        }
-
-        if (active) {
-            button.style.cursor = 'pointer';
-            button.onclick = () => {
-                this.onsavestatesaction(action, key);
-            };
-        } else {
-            button.style.cursor = 'default';
-            button.onclick = null;
-        }
-    }
-
-    private initButtons(saveManager: SaveManager): void {
-        const sceneDescId = this.currentSceneDescId;
-        const action = this.pickSaveStatesAction(this.inputManager);
-
-        if (action === SaveStatesAction.Load)
-            this.stateButtonsHeader.textContent = `Load Save State`;
-        else if (action === SaveStatesAction.Save)
-            this.stateButtonsHeader.textContent = `Save Save State`;
-        else if (action === SaveStatesAction.Delete)
-            this.stateButtonsHeader.textContent = `Delete Save State`;
-
-        for (let i = 0; i < this.stateButtons.length; i++) {
-            const key = saveManager.getSaveStateSlotKey(sceneDescId, i + 1);
-            this.initLoadStateButton(this.stateButtons[i], action, saveManager, key);
-            this.initLoadStateButton(this.defaultStateButtons[i], SaveStatesAction.LoadDefault, saveManager, key);
-        }
-    }
-
-    private _onSaveStateChanged(saveManager: SaveManager): void {
-        this.initButtons(saveManager);
-    }
-
-    private _onKeyEvent(): void {
-        this.initButtons(GlobalSaveManager);
-    }
-
-    public expandAndFocus(): void {
-        this.setExpanded(true);
-        this.setAutoClosed(false);
-        this.currentShareURLEntry.textarea.focus({ preventScroll: true });
-    }
-
-    public setCurrentSceneDescId(sceneDescId: string): void {
-        this.currentSceneDescId = sceneDescId;
-        this.currentSceneDescIdEntry.setValue(sceneDescId);
-        this.initButtons(GlobalSaveManager);
-    }
-
-    public setSaveState(saveState: string) {
-        this.currentShareURLEntry.setValue(buildShareURL(saveState));
-    }
-}
-
 function cloneCanvas(dst: HTMLCanvasElement, src: HTMLCanvasElement): void {
     dst.width = src.width;
     dst.height = src.height;
@@ -1402,17 +1243,54 @@ function cloneCanvas(dst: HTMLCanvasElement, src: HTMLCanvasElement): void {
 
 const CHECKERBOARD_IMAGE = 'url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAGElEQVQYlWNgYGCQwoKxgqGgcJA5h3yFAAs8BRWVSwooAAAAAElFTkSuQmCC")';
 
+export interface TextureListHolder {
+    textureNames: string[];
+    getViewerTexture(i: number): Promise<Viewer.Texture>;
+
+    onnewtextures: (() => void) | null;
+}
+
+class FrameDebouncer {
+    private timeoutId: number | null = null;
+    public callback: (() => void) | null = null;
+
+    constructor(public timeout = 100) {
+    }
+
+    private onframe = (): void => {
+        if (this.callback !== null)
+            this.callback();
+        this.timeoutId = null;
+    }
+
+    public trigger(): void {
+        if (this.timeoutId !== null)
+            this.clear();
+        if (this.callback !== null)
+            this.timeoutId = window.setTimeout(this.onframe, this.timeout);
+    }
+
+    public clear() {
+        if (this.timeoutId === null)
+            return;
+        clearTimeout(this.timeoutId);
+        this.timeoutId = null;
+    }
+}
+
 export class TextureViewer extends Panel {
     private scrollList: SingleSelect;
     private surfaceView: HTMLElement;
     private fullSurfaceView: HTMLElement;
     private properties: HTMLElement;
-    private textureList: Viewer.Texture[] = [];
+    private newTexturesDebouncer = new FrameDebouncer();
+    private textureList: TextureListHolder | null = null;
 
     constructor() {
         super();
 
         this.setTitle(TEXTURES_ICON, 'Textures');
+        this.setVisible(false);
 
         this.scrollList = new SingleSelect();
         this.scrollList.elem.style.height = `200px`;
@@ -1447,10 +1325,14 @@ export class TextureViewer extends Panel {
         this.fullSurfaceView.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
         this.fullSurfaceView.style.padding = '20px';
         this.extraRack.appendChild(this.fullSurfaceView);
-    }
 
-    public getViewerTextureList(): Viewer.Texture[] {
-        return this.textureList;
+        this.newTexturesDebouncer.callback = () => {
+            if (this.textureList !== null)
+                this.scrollList.setStrings(this.textureList.textureNames);
+            else
+                this.scrollList.setStrings([]);
+        };
+        this.setTextureList(null);
     }
 
     private showInSurfaceView(surface: HTMLCanvasElement) {
@@ -1475,8 +1357,10 @@ export class TextureViewer extends Panel {
         }
     }
 
-    private selectTexture(i: number) {
-        const texture: Viewer.Texture = this.textureList[i];
+    private async selectTexture(i: number) {
+        const texture = await this.textureList!.getViewerTexture(i);
+        assert(texture.surfaces.length > 0);
+
         this.scrollList.setHighlighted(i);
 
         const properties = new Map<string, string>();
@@ -1503,32 +1387,25 @@ export class TextureViewer extends Panel {
         });
 
         if (texture.surfaces.length > 0)
-        this.showInSurfaceView(texture.surfaces[0]);
+            this.showInSurfaceView(texture.surfaces[0]);
 
         this.showInFullSurfaceView(texture.surfaces);
     }
 
-    public setThingList(things: { viewerTexture: Viewer.Texture }[]) {
-        this.setTextureList(things.map((thing) => thing.viewerTexture));
-    }
+    public setTextureList(textureList: TextureListHolder | null = null): void {
+        this.textureList = textureList;
 
-    public setTextureList(textures: Viewer.Texture[]) {
-        textures = textures.filter((tex) => tex.surfaces.length > 0);
-
-        this.setVisible(textures.length > 0);
-        if (textures.length === 0)
-            return;
-
-        const strings = textures.map((texture) => texture.name);
-        this.scrollList.setStrings(strings);
-        this.textureList = textures;
-    }
-
-    public setTextureHolder(textureHolder: TextureHolder<any>): void {
-        this.setTextureList(textureHolder.viewerTextures);
-        textureHolder.onnewtextures = () => {
-            this.setTextureList(textureHolder.viewerTextures);
-        };
+        if (this.textureList !== null) {
+            this.textureList.onnewtextures = () => {
+                this.newTexturesDebouncer.trigger();
+            };
+            this.newTexturesDebouncer.trigger();
+            this.setVisible(true);
+        } else {
+            this.newTexturesDebouncer.clear();
+            this.scrollList.setStrings([]);
+            this.setVisible(false);
+        }
     }
 }
 
@@ -1569,24 +1446,22 @@ export class Slider implements Widget {
 }
 .Slider::-moz-range-track {
     cursor: pointer;
+    height: 24px;
     background: #444;
 }
 .Slider::-webkit-slider-runnable-track {
     cursor: pointer;
+    height: 24px;
     background: #444;
-}
-.Slider::-moz-range-progress, .Slider::-webkit-slider-thumb {
-    cursor: pointer;
-    background: #aaa;
 }
 </style>
 <div style="display: grid; grid-template-columns: 1fr 1fr; align-items: center">
-<div style="font-weight: bold" class="Label"></div>
+<div style="font-weight: bold; user-select: none" class="Label"></div>
 <input class="Slider" type="range">
 </div>
 `;
 
-        this.sliderInput = this.toplevel.querySelector('.Slider');
+        this.sliderInput = this.toplevel.querySelector('.Slider') as HTMLInputElement;
         this.sliderInput.oninput = this.onInput.bind(this);
 
         this.elem = this.toplevel;
@@ -1604,90 +1479,399 @@ export class Slider implements Widget {
     }
 
     public setLabel(label: string): void {
-        this.toplevel.querySelector('.Label').textContent = label;
+        this.toplevel.querySelector('.Label')!.textContent = label;
     }
 
     public getValue(): number {
         return +this.sliderInput.value;
     }
 
-    public setValue(v: number): void {
+    public setValue(v: number, triggerCallback: boolean = false): void {
         this.sliderInput.value = '' + v;
+        if (triggerCallback)
+            this.onInput();
     }
 
     public getT(): number {
-        return (+this.sliderInput.value - +this.sliderInput.min) / (+this.sliderInput.max - +this.sliderInput.min);
+        return invlerp(+this.sliderInput.min, +this.sliderInput.max, +this.sliderInput.value);
     }
 
     public setT(t: number): void {
-        const v = (t * (+this.sliderInput.max - +this.sliderInput.min)) + +this.sliderInput.min;
+        const v = lerp(+this.sliderInput.min, +this.sliderInput.max, t);
         this.setValue(v);
+    }
+}
+
+const SUN_ICON_PATH = `M12 2L13.09 8.26L18 5L14.74 9.91L21 11L14.74 12.09L18 17L13.09 13.74L12 20L10.91 13.74L6 17L9.26 12.09L3 11L9.26 9.91L6 5L10.91 8.26L12 2Z`;
+const MOON_ICON_PATH = `M12 3c.132 0 .263.004.393.012a7 7 0 1 0 8.595 8.595A8 8 0 1 1 12 3z`;
+
+export class CircularTimeSlider implements Widget {
+    public elem: HTMLElement;
+    public onvalue: ((value: number) => void) | null = null;
+    public onmanualchange: (() => void) | null = null;
+
+    private svg: SVGSVGElement;
+    private thumb: SVGCircleElement;
+    private timeLabel: HTMLElement;
+    private value: number = 0;
+    private isDragging: boolean = false;
+
+    // Dial dimensions
+    private readonly size = 120;
+    private readonly cx = 60;
+    private readonly cy = 60;
+    private readonly radius = 45;
+    private readonly thumbRadius = 8;
+
+    constructor() {
+        const toplevel = document.createElement('div');
+        toplevel.style.display = 'flex';
+        toplevel.style.flexDirection = 'column';
+        toplevel.style.alignItems = 'center';
+        toplevel.style.padding = '8px';
+        toplevel.style.userSelect = 'none';
+
+        // Create SVG dial
+        this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        this.svg.setAttribute('width', `${this.size}`);
+        this.svg.setAttribute('height', `${this.size}`);
+        this.svg.setAttribute('viewBox', `0 0 ${this.size} ${this.size}`);
+        this.svg.style.cursor = 'pointer';
+
+        // Background circle (track)
+        const track = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        track.setAttribute('cx', `${this.cx}`);
+        track.setAttribute('cy', `${this.cy}`);
+        track.setAttribute('r', `${this.radius}`);
+        track.setAttribute('fill', 'none');
+        track.setAttribute('stroke', '#333');
+        track.setAttribute('stroke-width', '12');
+        this.svg.appendChild(track);
+
+        // Day arc (top half)
+        const dayArc = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const dayPath = this.describeArc(this.cx, this.cy, this.radius, Math.PI, MathConstants.TAU);
+        dayArc.setAttribute('d', dayPath);
+        dayArc.setAttribute('fill', 'none');
+        dayArc.setAttribute('stroke', '#e8a430');
+        dayArc.setAttribute('stroke-width', '10');
+        dayArc.setAttribute('stroke-linecap', 'round');
+        this.svg.appendChild(dayArc);
+
+        // Night arc (bottom half)
+        const nightArc = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const nightPath = this.describeArc(this.cx, this.cy, this.radius, 0, Math.PI);
+        nightArc.setAttribute('d', nightPath);
+        nightArc.setAttribute('fill', 'none');
+        nightArc.setAttribute('stroke', '#2a3a5a');
+        nightArc.setAttribute('stroke-width', '10');
+        nightArc.setAttribute('stroke-linecap', 'round');
+        this.svg.appendChild(nightArc);
+
+        // Sun icon at top (noon position)
+        const sunGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        sunGroup.setAttribute('transform', `translate(${this.cx - 8}, ${this.cy - this.radius - 8}) scale(0.7)`);
+        const sunPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        sunPath.setAttribute('d', SUN_ICON_PATH);
+        sunPath.setAttribute('fill', '#ffd700');
+        sunGroup.appendChild(sunPath);
+        this.svg.appendChild(sunGroup);
+
+        // Moon icon at bottom (midnight position)
+        const moonGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        moonGroup.setAttribute('transform', `translate(${this.cx - 6}, ${this.cy + this.radius - 6}) scale(0.5)`);
+        const moonPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        moonPath.setAttribute('d', MOON_ICON_PATH);
+        moonPath.setAttribute('fill', '#aaccff');
+        moonGroup.appendChild(moonPath);
+        this.svg.appendChild(moonGroup);
+
+        // Thumb (draggable indicator)
+        this.thumb = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        this.thumb.setAttribute('r', `${this.thumbRadius}`);
+        this.thumb.setAttribute('fill', HIGHLIGHT_COLOR);
+        this.thumb.setAttribute('stroke', 'white');
+        this.thumb.setAttribute('stroke-width', '2');
+        this.thumb.style.cursor = 'grab';
+        this.svg.appendChild(this.thumb);
+
+        toplevel.appendChild(this.svg);
+
+        // Time label below dial
+        this.timeLabel = document.createElement('div');
+        this.timeLabel.style.marginTop = '8px';
+        this.timeLabel.style.fontSize = '14px';
+        this.timeLabel.style.fontWeight = 'bold';
+        this.timeLabel.style.color = 'white';
+        toplevel.appendChild(this.timeLabel);
+
+        this.elem = toplevel;
+
+        // Set up event handlers
+        this.svg.addEventListener('mousedown', this.onMouseDown.bind(this));
+        document.addEventListener('mousemove', this.onMouseMove.bind(this));
+        document.addEventListener('mouseup', this.onMouseUp.bind(this));
+
+        // Initial position
+        this.updateThumbPosition();
+        this.updateTimeLabel();
+    }
+
+    private describeArc(x: number, y: number, radius: number, startAngle: number, endAngle: number): string {
+        const start = this.polarToCartesian(x, y, radius, endAngle);
+        const end = this.polarToCartesian(x, y, radius, startAngle);
+        const largeArcFlag = (endAngle - startAngle) <= Math.PI ? '0' : '1';
+        return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`;
+    }
+
+    private polarToCartesian(cx: number, cy: number, radius: number, angle: number): { x: number, y: number } {
+        return {
+            x: cx + radius * Math.cos(angle),
+            y: cy + radius * Math.sin(angle),
+        };
+    }
+
+    // Convert normalized time (0-1) to angle in radians.
+    private timeToAngle(t: number): number {
+        return MathConstants.TAU * (t + 0.25);
+    }
+
+    // Convert angle in radians to normalized time (0-1).
+    private angleToTime(angle: number): number {
+        return (angle / MathConstants.TAU + 0.75) % 1;
+    }
+
+    private updateThumbPosition(): void {
+        const angle = this.timeToAngle(this.value);
+        const pos = this.polarToCartesian(this.cx, this.cy, this.radius, angle);
+        this.thumb.setAttribute('cx', `${pos.x}`);
+        this.thumb.setAttribute('cy', `${pos.y}`);
+    }
+
+    private updateTimeLabel(): void {
+        const totalHours = this.value * 24;
+        const hours24 = Math.floor(totalHours) % 24;
+        const minutes = Math.floor((totalHours - Math.floor(totalHours)) * 60);
+
+        const hours12 = hours24 % 12 || 12;
+        const ampm = hours24 < 12 ? 'AM' : 'PM';
+        const minuteStr = minutes.toString().padStart(2, '0');
+
+        this.timeLabel.textContent = `${hours12}:${minuteStr} ${ampm}`;
+    }
+
+    private onMouseDown(e: MouseEvent): void {
+        this.isDragging = true;
+        this.thumb.style.cursor = 'grabbing';
+        this.updateValueFromMouse(e);
+        e.preventDefault();
+    }
+
+    private onMouseMove(e: MouseEvent): void {
+        if (!this.isDragging) return;
+        this.updateValueFromMouse(e);
+    }
+
+    private onMouseUp(): void {
+        if (this.isDragging) {
+            this.isDragging = false;
+            this.thumb.style.cursor = 'grab';
+        }
+    }
+
+    private updateValueFromMouse(e: MouseEvent): void {
+        const rect = this.svg.getBoundingClientRect();
+        const x = e.clientX - rect.left - this.cx;
+        const y = e.clientY - rect.top - this.cy;
+
+        // Calculate angle from center to mouse position
+        const angle = Math.atan2(y, x);
+        const newValue = this.angleToTime(angle);
+
+        if (newValue !== this.value) {
+            this.value = newValue;
+            this.updateThumbPosition();
+            this.updateTimeLabel();
+
+            if (this.onmanualchange !== null)
+                this.onmanualchange();
+
+            if (this.onvalue !== null)
+                this.onvalue(this.value);
+        }
+    }
+
+    public getValue(): number {
+        return this.value;
+    }
+
+    public setValue(v: number, triggerCallback: boolean = false): void {
+        this.value = clamp(v, 0, 1);
+        this.updateThumbPosition();
+        this.updateTimeLabel();
+
+        if (triggerCallback && this.onvalue !== null)
+            this.onvalue(this.value);
+    }
+}
+
+export class TimeOfDayPanel extends Panel {
+    public onvaluechange: ((time: number, useDynamicTime: boolean) => void) | null = null;
+
+    private slider: CircularTimeSlider;
+    private dynamicTimeCheckbox: Checkbox;
+    private useDynamicTime: boolean = true;
+
+    constructor() {
+        super();
+
+        this.setTitle(TIME_OF_DAY_ICON, 'Time of Day');
+        this.customHeaderBackgroundColor = COOL_BLUE_COLOR;
+        this.syncHeaderStyle();
+
+        // "Dynamic Time" checkbox
+        this.dynamicTimeCheckbox = new Checkbox('Dynamic Time', true);
+        this.dynamicTimeCheckbox.onchanged = () => {
+            this.useDynamicTime = this.dynamicTimeCheckbox.checked;
+            if (this.onvaluechange !== null)
+                this.onvaluechange(this.slider.getValue(), this.useDynamicTime);
+        };
+        this.contents.appendChild(this.dynamicTimeCheckbox.elem);
+
+        // Circular time slider
+        this.slider = new CircularTimeSlider();
+
+        // When user manually changes the slider, disable dynamic time
+        this.slider.onmanualchange = () => {
+            if (this.useDynamicTime) {
+                this.useDynamicTime = false;
+                this.dynamicTimeCheckbox.setChecked(false);
+            }
+        };
+
+        this.slider.onvalue = (value: number) => {
+            if (this.onvaluechange !== null)
+                this.onvaluechange(value, this.useDynamicTime);
+        };
+
+        this.contents.appendChild(this.slider.elem);
+    }
+
+    // Set normalized time (0-1)
+    public setTime(time: number): void {
+        this.slider.setValue(time);
+    }
+}
+
+export class RadioButtons implements Widget {
+    public elem: HTMLElement;
+    public selectedIndex: number = -1;
+    public onselectedchange: ((() => void) | null) = null;
+    public options: HTMLElement[] = [];
+
+    constructor(private title: string, optionNames: string[]) {
+        this.elem = document.createElement('div');
+
+        this.elem.style.display = 'grid';
+        this.elem.style.alignItems = 'center';
+
+        if (title.length) {
+            const header = document.createElement('div');
+            header.style.fontWeight = 'bold';
+            header.textContent = title;
+            this.elem.appendChild(header);
+        }
+
+        this.setOptions(optionNames);
+    }
+
+    public setOptions(optionNames: string[]): void {
+        const fr = (this.title.length ? `${optionNames.length}fr ` : ``) + `${optionNames.map(() => '1fr').join(' ')}`;
+        this.elem.style.gridTemplateColumns = fr;
+
+        optionNames.forEach((optionName, i) => {
+            const option = document.createElement('div');
+            option.style.fontWeight = `bold`;
+            option.style.textAlign = `center`;
+            option.style.lineHeight = `24px`;
+            option.style.cursor = `pointer`;
+            option.textContent = optionName;
+            option.onclick = () => {
+                this.setSelectedIndex(i);
+            };
+
+            this.elem.appendChild(option);
+            this.options.push(option);
+        });
+
+        this.selectedIndex = -1;
+    }
+
+    public setVisible(v: boolean) {
+        this.elem.style.display = v ? 'grid' : 'none';
+    }
+
+    private sync(): void {
+        this.options.forEach((option, i) => {
+            setElementHighlighted(option, i === this.selectedIndex);
+        });
+    }
+
+    public setSelectedIndex(i: number): void {
+        if (this.selectedIndex === i)
+            return;
+
+        this.selectedIndex = i;
+        this.sync();
+
+        if (this.onselectedchange !== null)
+            this.onselectedchange();
     }
 }
 
 class ViewerSettings extends Panel {
     private fovSlider: Slider;
+    private camControllerClasses: CameraControllerClass[] = [FPSCameraController, OrbitCameraController, OrthoCameraController];
+    private camRadioButtons: RadioButtons;
     private camSpeedSlider: Slider;
-    private cameraControllerWASD: HTMLElement;
-    private cameraControllerOrbit: HTMLElement;
     private invertYCheckbox: Checkbox;
     private invertXCheckbox: Checkbox;
+    private antialiasingRadioButtons: RadioButtons;
+    private viewer: Viewer.Viewer;
 
-    constructor(private viewer: Viewer.Viewer) {
+    constructor(private ui: UI) {
         super();
 
         this.setTitle(FRUSTUM_ICON, 'Viewer Settings');
 
-        // TODO(jstpierre): make css not leak
-        this.contents.innerHTML = `
-<style>
-.SettingsHeader, .SettingsButton {
-    font-weight: bold;
-}
-.SettingsButton {
-    background: #444;
-    text-align: center;
-    line-height: 24px;
-    cursor: pointer;
-}
-</style>
-
-<div class="SliderContainer">
-</div>
-
-<div style="display: grid; grid-template-columns: 2fr 1fr 1fr; align-items: center;">
-<div class="SettingsHeader">Camera Controller</div>
-<div class="SettingsButton CameraControllerWASD">WASD</div><div class="SettingsButton CameraControllerOrbit">Orbit</div>
-</div>
-`;
         this.contents.style.lineHeight = '36px';
 
-        const sliderContainer = this.contents.querySelector('.SliderContainer');
+        // Don't change the order
+        this.camRadioButtons = new RadioButtons('Camera Controls', ['WASD', 'Orbit', 'Ortho']);
+        this.camRadioButtons.onselectedchange = () => {
+            if (ui.studioModeEnabled)
+                return;
+
+            this.setCameraControllerIndex(this.camRadioButtons.selectedIndex);
+        };
+        this.contents.appendChild(this.camRadioButtons.elem);
+
         this.fovSlider = new Slider();
         this.fovSlider.setLabel("Field of View");
         this.fovSlider.setRange(1, 100);
-        this.fovSlider.setValue(25);
         this.fovSlider.onvalue = this.onFovSliderChange.bind(this);
-        sliderContainer.appendChild(this.fovSlider.elem);
+        this.contents.appendChild(this.fovSlider.elem);
 
         this.camSpeedSlider = new Slider();
         this.camSpeedSlider.setLabel("Camera Speed");
         this.camSpeedSlider.setRange(0, 200);
-        this.camSpeedSlider.onvalue = this.updateCameraSpeed.bind(this);
-        sliderContainer.appendChild(this.camSpeedSlider.elem);
+        this.camSpeedSlider.onvalue = this.updateCameraSpeedFromSlider.bind(this);
+        this.contents.appendChild(this.camSpeedSlider.elem);
 
-        this.viewer.addKeyMoveSpeedListener(this.onCameraController.bind(this));
-        this.viewer.inputManager.addScrollListener(this.onScrollWheel.bind(this));
-
-        this.cameraControllerWASD = this.contents.querySelector('.CameraControllerWASD') as HTMLInputElement;
-        this.cameraControllerWASD.onclick = () => {
-            this.setCameraControllerClass(FPSCameraController);
-        };
-
-        this.cameraControllerOrbit = this.contents.querySelector('.CameraControllerOrbit') as HTMLInputElement;
-        this.cameraControllerOrbit.onclick = () => {
-            this.setCameraControllerClass(OrbitCameraController);
-        };
+        this.antialiasingRadioButtons = new RadioButtons('Antialiasing', []);
+        this.antialiasingRadioButtons.onselectedchange = () => { GlobalSaveManager.saveSetting(`AntialiasingMode`, this.antialiasingRadioButtons.selectedIndex); };
+        this.contents.appendChild(this.antialiasingRadioButtons.elem);
+        GlobalSaveManager.addSettingListener('AntialiasingMode', this.antialiasingChanged.bind(this));
 
         this.invertYCheckbox = new Checkbox('Invert Y Axis?');
         this.invertYCheckbox.onchanged = () => { GlobalSaveManager.saveSetting(`InvertY`, this.invertYCheckbox.checked); };
@@ -1700,36 +1884,70 @@ class ViewerSettings extends Panel {
         GlobalSaveManager.addSettingListener('InvertX', this.invertXChanged.bind(this));
     }
 
-    private onFovSliderChange(e: UIEvent): void {
-        const slider = (<HTMLInputElement> e.target);
+    public setViewer(viewer: Viewer.Viewer): void {
+        this.viewer = viewer;
+        this.viewer.addKeyMoveSpeedListener(this.onKeyMoveSpeedChanged.bind(this));
+        this.viewer.inputManager.addScrollListener(this.onScrollWheel.bind(this));
+
+        const limits = this.viewer.gfxDevice.queryLimits();
+
+        const aaModes = ['None', 'FXAA'];
+        if (limits.supportedSampleCounts.includes(4))
+            aaModes.push('4x MSAA');
+        this.antialiasingRadioButtons.setOptions(aaModes);
+        GlobalSaveManager.callSettingsListener('AntialiasingMode');
+    }
+
+    public setCameraControllerIndex(idx: number) {
+        const index = this.camRadioButtons.selectedIndex;
+        const cameraControllerClass = this.camControllerClasses[index];
+        this.setCameraControllerClass(cameraControllerClass);
+    }
+
+    private onFovSliderChange(): void {
         const value = this.fovSlider.getT();
-        this.viewer.fovY = value * (Math.PI * 0.995);
+        this.viewer.camera.fovY = value * (Math.PI * 0.995);
     }
 
-    private onCameraController(): void {
-        this.camSpeedSlider.setValue(this.viewer.cameraController!.getKeyMoveSpeed());
+    private onKeyMoveSpeedChanged(): void {
+        const keyMoveSpeed = this.viewer.cameraController!.getKeyMoveSpeed();
+        if (keyMoveSpeed !== null) {
+            setElementVisible(this.camSpeedSlider.elem, true);
+            this.camSpeedSlider.setValue(keyMoveSpeed);
+            this.ui.cameraSpeedIndicator.setCameraSpeed(keyMoveSpeed);
+        } else {
+            setElementVisible(this.camSpeedSlider.elem, false);
+        }
     }
 
-    private onScrollWheel(): void {
-        const v = this.camSpeedSlider.getValue() + Math.sign(this.viewer.inputManager.dz)*4;
-        this.camSpeedSlider.setValue(v);
-        this.updateCameraSpeed();
+    public setupFromCamera(cameraController: CameraController, camera: Camera): void {
+        const keyMoveSpeed = cameraController.getKeyMoveSpeed();
+        if (keyMoveSpeed !== null)
+            this.camSpeedSlider.setValue(keyMoveSpeed);
+        this.fovSlider.setValue(camera.fovY / Math.PI * 100);
     }
 
     private setCameraControllerClass(cameraControllerClass: CameraControllerClass) {
+        if (this.viewer.cameraController instanceof cameraControllerClass)
+            return;
         this.viewer.setCameraController(new cameraControllerClass());
         this.cameraControllerSelected(cameraControllerClass);
-        this.updateCameraSpeed();
+        this.updateCameraSpeedFromSlider();
     }
 
-    private updateCameraSpeed(): void {
-        if (this.viewer.cameraController !== null)
-            this.viewer.cameraController.setKeyMoveSpeed(this.camSpeedSlider.getValue());
+    private onScrollWheel(): void {
+        const v = clamp(this.camSpeedSlider.getValue() + Math.sign(this.viewer.inputManager.dz) * 4, 0, 200);
+        this.ui.setMouseActive();
+        this.viewer.setKeyMoveSpeed(v);
+    }
+
+    private updateCameraSpeedFromSlider(): void {
+        this.viewer.setKeyMoveSpeed(this.camSpeedSlider.getValue());
     }
 
     public cameraControllerSelected(cameraControllerClass: CameraControllerClass) {
-        setElementHighlighted(this.cameraControllerWASD, cameraControllerClass === FPSCameraController);
-        setElementHighlighted(this.cameraControllerOrbit, cameraControllerClass === OrbitCameraController);
+        this.camRadioButtons.setSelectedIndex(this.camControllerClasses.indexOf(cameraControllerClass));
+        setElementVisible(this.fovSlider.elem, cameraControllerClass !== OrthoCameraController);
     }
 
     private invertYChanged(saveManager: SaveManager, key: string): void {
@@ -1740,6 +1958,72 @@ class ViewerSettings extends Panel {
     private invertXChanged(saveManager: SaveManager, key: string): void {
         const invertX = saveManager.loadSetting<boolean>(key, false);
         this.invertXCheckbox.setChecked(invertX);
+    }
+
+    private antialiasingChanged(saveManager: SaveManager, key: string): void {
+        const antialiasingMode = saveManager.loadSetting<AntialiasingMode>(key, AntialiasingMode.FXAA);
+        this.antialiasingRadioButtons.setSelectedIndex(antialiasingMode);
+    }
+}
+
+class XRSettings extends Panel {
+    public onWebXRStateRequested: (state: boolean) => void = (state: boolean) => { };
+
+    public enableXRCheckBox: Checkbox;
+    private scaleSlider: Slider;
+
+    constructor(private ui: UI, private viewer: Viewer.Viewer) {
+        super();
+
+        this.setTitle(VR_ICON, 'VR Settings');
+
+        this.contents.style.lineHeight = '36px';
+
+        this.contents.innerHTML += `
+        <div id="About">
+            <p>Click on the <strong>Enable VR</strong> checkbox to go in VR mode.</p>
+            <p><strong>Movement controls:</strong></p>
+            <ul>
+                <li>
+                    <strong>Hand controls:</strong> Pinch to pan
+                </li>
+                <li>
+                    <strong>Generic controller:</strong>
+                    <p>Press the <strong>Trigger</strong> to go up, and use the <strong>Squeeze Button</strong> to go down.
+                    Move horizontally by using the <strong>Joystick</strong>.
+                </li>
+            </ul>
+        </div>
+        `;
+
+        this.enableXRCheckBox = new Checkbox('Enable VR');
+        this.contents.appendChild(this.enableXRCheckBox.elem);
+        this.enableXRCheckBox.onchanged = this.enableXRChecked.bind(this);
+
+        const displayScaleValue = (value: Number) => {
+            return value.toPrecision(5).toString();
+        };
+
+        const getSliderLabel = () => {
+            return `VR World Scale: ${displayScaleValue(this.viewer.xrCameraController.worldScale)}`;
+        };
+
+        this.scaleSlider = new Slider();
+        this.scaleSlider.setLabel(getSliderLabel());
+        this.scaleSlider.setRange(10, 10000);
+        this.scaleSlider.setValue(this.viewer.xrCameraController.worldScale);
+        this.scaleSlider.onvalue = () => {
+            this.viewer.xrCameraController.worldScale = this.scaleSlider.getValue();
+            this.scaleSlider.setValue(this.viewer.xrCameraController.worldScale);
+            this.scaleSlider.setLabel(getSliderLabel());
+        };
+        this.contents.appendChild(this.scaleSlider.elem);
+    }
+
+    private enableXRChecked() {
+        const enableXR = this.enableXRCheckBox.checked;
+        this.enableXRCheckBox.setChecked(enableXR);
+        this.onWebXRStateRequested(enableXR);
     }
 }
 
@@ -1754,11 +2038,10 @@ class LineGraph {
     }
 
     public beginDraw(width: number, height: number): void {
-        this.canvas.width = width;
-        this.canvas.height = height;
+        Viewer.resizeCanvas(this.canvas, width, height, window.devicePixelRatio);
 
         const ctx = this.ctx;
-        ctx.clearRect(0, 0, width, height);
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
         this.textYOffset = 24;
     }
@@ -1799,14 +2082,13 @@ class LineGraph {
     }
 }
 
-
 class StatisticsPanel extends Panel {
-    public history: RenderStatistics[] = [];
     private fpsGraph = new LineGraph();
+    private fpsHistory: number[] = [];
     private fpsPoints: number[] = [];
     private fpsColor: Color = { r: 0.4, g: 0.9, b: 0.6, a: 1.0 };
 
-    constructor(private viewer: Viewer.Viewer) {
+    constructor() {
         super();
         this.setTitle(STATISTICS_ICON, 'Statistics');
 
@@ -1817,40 +2099,102 @@ class StatisticsPanel extends Panel {
         if (!this.expanded)
             return;
 
-        this.history.unshift({ ...renderStatistics });
-
-        while (this.history.length > 100) {
-            this.history.pop();
-        }
+        this.fpsHistory.unshift(renderStatistics.fps);
+        while (this.fpsHistory.length > 100)
+            this.fpsHistory.pop();
 
         this.fpsPoints.length = 100;
-        for (let i = 0; i < this.fpsPoints.length; i++) {
-            this.fpsPoints[i] = this.history[i] !== undefined ? this.history[i].fps : 0;
-        }
+        for (let i = 0; i < this.fpsPoints.length; i++)
+            this.fpsPoints[i] = this.fpsHistory[i] !== undefined ? this.fpsHistory[i] : 0;
 
-        this.fpsGraph.beginDraw(400, 200);
+        this.fpsGraph.beginDraw(440, 200);
         this.fpsGraph.drawPoints(this.fpsPoints, this.fpsColor);
 
-        this.fpsGraph.drawText(`FPS: ${renderStatistics.fps | 0}`);
-        if (renderStatistics.drawCallCount)
-            this.fpsGraph.drawText(`Draw Calls: ${renderStatistics.drawCallCount}`);
-        if (renderStatistics.triangleCount)
-            this.fpsGraph.drawText(`Drawn Triangles: ${renderStatistics.triangleCount}`);
-        if (renderStatistics.textureBindCount)
-            this.fpsGraph.drawText(`Texture Binds: ${renderStatistics.textureBindCount}`);
-        if (renderStatistics.bufferUploadCount)
-            this.fpsGraph.drawText(`Buffer Uploads: ${renderStatistics.bufferUploadCount}`);
+        for (const line of renderStatistics.lines)
+            this.fpsGraph.drawText(line);
+    }
+}
 
-        const camPositionX = this.viewer.camera.worldMatrix[12].toFixed(2);
-        const camPositionY = this.viewer.camera.worldMatrix[13].toFixed(2);
-        const camPositionZ = this.viewer.camera.worldMatrix[14].toFixed(2);
-        this.fpsGraph.drawText(`Camera Position: ${camPositionX} ${camPositionY} ${camPositionZ}`);
+class StudioSidePanel extends Panel {
+    private studioSidePanelHelpBtn: HTMLButtonElement;
+    private enableStudioBtn: HTMLElement;
+    private disableStudioBtn: HTMLElement;
+
+    constructor(private ui: UI) {
+        super();
+        this.setTitle(CLAPBOARD_ICON, 'Studio');
+        document.head.insertAdjacentHTML('beforeend', `
+            <style>
+                button.SettingsButton {
+                    font: 16px monospace;
+                    font-weight: bold;
+                    border: none;
+                    width: 100%;
+                    color: inherit;
+                    padding: 0.15rem;
+                    text-align: center;
+                    background-color: rgb(64, 64, 64);
+                    cursor: pointer;
+                }
+                #studioSidePanelHelpBtn {
+                    width: 32px;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    margin-left: 1rem;
+                    background: transparent;
+                    border: none;
+                    cursor: pointer;
+                }
+            </style>
+            `);
+        this.contents.insertAdjacentHTML('beforeend', `
+            <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; align-items: center;">
+                <div style="display: flex;">
+                    <span>Studio Mode</span>
+                    <button class="SettingsButton" id="studioSidePanelHelpBtn"></button>
+                </div>
+                <button id="enableStudioBtn" class="SettingsButton">Enable</button>
+                <button id="disableStudioBtn" class="SettingsButton">Disable</button>
+            </div>
+            <div id="studioPanelContents" hidden></div>
+        `);
+        this.contents.style.lineHeight = '36px';
+
+        this.studioSidePanelHelpBtn = this.contents.querySelector('#studioSidePanelHelpBtn') as HTMLButtonElement;
+        this.studioSidePanelHelpBtn.appendChild(createDOMFromString(ABOUT_ICON).querySelector('svg')!);
+        this.studioSidePanelHelpBtn.onclick = () => {
+            const helpLink = document.createElement('a') as HTMLAnchorElement;
+            helpLink.rel = 'noopener noreferrer';
+            helpLink.target = '_blank';
+            helpLink.href = 'https://github.com/magcius/noclip.website/wiki/Studio';
+            helpLink.click();
+        }
+
+        this.enableStudioBtn = this.contents.querySelector('#enableStudioBtn') as HTMLInputElement;
+        this.disableStudioBtn = this.contents.querySelector('#disableStudioBtn') as HTMLInputElement;
+
+        this.enableStudioBtn.onclick = () => {
+            if (!ui.studioModeEnabled) {
+                ui.enableStudioMode();
+                setElementHighlighted(this.enableStudioBtn, true);
+                setElementHighlighted(this.disableStudioBtn, false);
+                this.setExpanded(false);
+            }
+        }
+        this.disableStudioBtn.onclick = () => {
+            if (ui.studioModeEnabled) {
+                ui.disableStudioMode();
+                setElementHighlighted(this.disableStudioBtn, true);
+                setElementHighlighted(this.enableStudioBtn, false);
+            }
+        };
+        setElementHighlighted(this.disableStudioBtn, true);
+        setElementHighlighted(this.enableStudioBtn, false);
     }
 }
 
 class About extends Panel {
-    public onfaq: (() => void) | null = null;
-
     constructor() {
         super();
         this.setTitle(ABOUT_ICON, 'About');
@@ -1888,266 +2232,17 @@ class About extends Panel {
 <h1> <img src="${logoURL}"> <span> noclip.website </span> </h1>
 <h2> A digital museum of video game levels </h2>
 
-<a href="#" class="FAQLink"> What is this? / FAQ </a>
-
 <p> <strong>CLICK AND DRAG</strong> to look around and use <strong>WASD</strong> to move the camera </p>
 <p> Hold <strong>SHIFT</strong> to go faster, and use <strong>MOUSE WHEEL</strong> to fine tune the speed
 <strong>Z</strong> toggles the UI. </p>
 
 <p><a href="https://discord.gg/bkJmKKv"><strong>JOIN THE DISCORD</strong> by clicking here</a></p>
 
-<p><strong>CODE PRIMARILY WRITTEN</strong> by <a href="https://twitter.com/JasperRLZ">Jasper</a></p>
-
 <p><strong>OPEN SOURCE</strong> at <a href="${GITHUB_URL}">GitHub</a></p>
 
 <p class="BuildVersion"><a href="${GITHUB_REVISION_URL}">build ${GIT_SHORT_REVISION}</a></p>
 </div>
 `;
-        const faqLink: HTMLAnchorElement = this.contents.querySelector('.FAQLink');
-        faqLink.onclick = () => {
-            if (this.onfaq !== null)
-                this.onfaq();
-        };
-    }
-}
-
-class FAQPanel implements Widget {
-    private toplevel: HTMLElement;
-    private panel: HTMLElement;
-
-    public elem: HTMLElement;
-
-    constructor() {
-        this.toplevel = document.createElement('div');
-        this.toplevel.classList.add('FAQPanel');
-        this.toplevel.style.position = 'absolute';
-        this.toplevel.style.left = '0';
-        this.toplevel.style.top = '0';
-        this.toplevel.style.right = '0';
-        this.toplevel.style.bottom = '0';
-        this.toplevel.style.background = 'rgba(0, 0, 0, 0.8)';
-        this.toplevel.onclick = () => {
-            this.elem.style.display = 'none';
-        };
-
-        const styleFrag = createDOMFromString(`
-<style>
-.FAQPanel a:link, .FAQPanel a:visited { color: #ddd; }
-.FAQPanel a:hover { color: #fff; }
-</style>
-`);
-        this.toplevel.appendChild(styleFrag);
-
-        this.panel = document.createElement('div');
-        this.panel.style.boxSizing = 'border-box';
-        this.panel.style.width = '50vw';
-        this.panel.style.margin = '5vh auto';
-        this.panel.style.height = '90vh';
-        this.panel.style.backgroundColor = 'black';
-        this.panel.style.padding = '2em';
-        this.panel.style.font = '11pt monospace';
-        this.panel.style.overflow = 'auto';
-        this.panel.style.color = '#ddd';
-        this.panel.style.textAlign = 'justify';
-        this.panel.onclick = (e) => {
-            e.stopPropagation();
-        };
-
-        const qa = document.createElement('div');
-        this.panel.appendChild(qa);
-
-        const faq = `
-## What is noclip.website?
-
-<p>noclip.website is a celebration of video game level design and art. It's a chance to
-explore and deepen your appreciation for some of your favorite games.</p>
-
-## Why did you make this?
-
-<p>I've always had an appreciation for the incredible worlds that game developers make.
-Sometimes staring closely at levels might help you understand the challenges the designers
-were facing, and what problems and techniques they used to solve them. You can learn a lot
-about a game by looking in the places they <em>don't</em> show in the game itself. It's
-also a ton of fun to test your memory, seeing if you can remember how a level is laid
-out, or where two rooms might connect to each other.</p>
-
-## It doesn't work!
-
-<p>Oops, sorry about that. Please let me know through either the <a href="https://discord.gg/bkJmKKv">official noclip.website Discord</a>
-or <a href="https://twitter.com/JasperRLZ/">Twitter</a>. Try to let me know what
-OS/browser/GPU you were using, and what game you tried to view, and I'll investigate.</p>
-
-## Can I request a game?
-
-<p>Maybe. Check around to see if anybody has looked at the game files before. If there's
-existing community documentation, that helps a lot. And if you're around to help answer
-questions or provide map names, I'm even more inclined.</p>
-
-<p>Even having documentation, games can take months of my time to add. So I have to be
-very careful with which games I choose to spend my time with.</p>
-
-<p>If you have some programming skills and want to try to add a game yourself, I fully
-welcome that. Join the Discord and I will be happy to help you get set up with a
-development environment and walk you through the code.</p>
-
-## Why do some levels look broken?
-
-<p>In order to put a game on the website, I first need to take apart the game, extract
-the data, and then figure out how to put it back together. Some of these games, especially
-the newer ones, are really complex with their levels and their models, and that often means
-it takes more work to make it look correct. The line between "game engine" and "game data"
-is only getting blurrier and blurrier.</p>
-
-<p>My dream is that the site contains fully accurate versions of each game, and I try
-to get closer to that goal when I can, but the effort and time involved to make an accurate
-recreation can sometimes be far too much, or would push me more into recreating large
-parts of the original game's engine, which I'm less interested in doing myself.</p>
-
-## How do I export models from the site?
-
-<p>You can't. From the technical side, there is no one consistent file format that has
-all of the features that an accurate model would require. From a personal perspective,
-I'm not ready to take on the support burden of writing an export tool.</p>
-
-<p>That said, if you would like to use my work as a base to build your own tools, the website
-is open-source and source code can be found at <a href="https://github.com/magcius/noclip.website">GitHub</a>.</p>
-
-<p>If you are looking for art for your own projects, there are some fantastic artists
-out there in the community that are always looking for work. Hire them instead of
-using art assets from other games.</p>
-
-## This is cool! Any way I can help you out!
-
-<p>Absolutely. Join <a href="https://discord.gg/bkJmKKv">the official Discord</a> and ask around if you would like to help out.
-The easiest things to help out with are providing savestates and naming maps, and can
-be done even if you do not know how to code. There's also some work that would be
-appreciated to help me improve accuracy, like running games in certain modes to help
-me compare the two.</p>
-
-<p>If you have a more tech-y background, there's always coding work to be done. All
-the source code to the site is available at <a href="https://github.com/magcius/noclip.website">GitHub</a>,
-whether you want to browse around, use it for your own purposes, or help contribute.</p>
-
-## Why does Skyward Sword have a level called Despacito? Is that its official name?
-
-<p>Nah. The internal names of a lot of the Zelda games is often just a letter-number code,
-something like 'F203_05'. Most of the maps have no real in-game name as far as I can
-tell, so I often spend a lot of time hunting down longplays on YouTube or playing the
-game myself to try and come up with a name for it. I had done this for most of
-Skyward Sword, but got a bit stumped on some of the maps, and put "Despacito" as an
-inside joke.</p>
-
-<p>If you come up with a better name for these maps, feel free to tell me, either on
-the <a href="https://discord.gg/bkJmKKv">official noclip.website Discord</a> or through
-<a href="https://twitter.com/JasperRLZ/">Twitter</a>.</p>
-
-## Are you afraid of being taken down?
-
-<p>Less than you might think. Companies take down fan projects when they're competing
-with their in-house projects. I don't see noclip.website as competing with any game
-out there &mdash; it's more of a museum, not a game. The worlds on display are incredible
-and I hope they encourage you to go out and buy a copy of the game itself.</p>
-
-<p>That said, I have enormous respect for the developers and dev teams and if I received
-a take-down request, I would honor it. It is their work on display, after all.</p>
-
-<p>Developers are only able to make these fantastic worlds if we collectively support
-them. noclip would not exist without their hard work and dedication. To ensure that they
-remain healthy, please try to buy games instead of pirating them. I also put in extra effort
-to ensure that all assets available on this site cannot be used to pirate the game itself.</p>
-
-## Do you accept donations?
-
-<p>No. Use the money to buy some games instead.</p>
-
-## Any affiliation to noclip, the documentary people?
-
-<p>I chatted with them once, but the name is a coincidence. The name comes from an old Quake
-command that would let you fly through the levels here, just like in the game.</p>
-
-## Have you seen the YouTube show Boundary Break?
-
-<p>Of course! I love that show. I'm ecstatic to see that exploring video game levels from
-different angles has captured the imaginations of such a wide audience. And I hope that this
-site encourages that same curiosity that's visible all throughout Boundary Break, trekking
-through these levels on your own adventures!</p>
-
-## Who made this site?
-
-<p>In my opinion? The artists and game developers. They made everything you actually see here
-on display.</p>
-
-<p>But in terms of, you know, developing the site itself, that would be me, <a href="https://twitter.com/JasperRLZ/">Jasper</a>,
-but I could not have done it alone. I've been assisted by so many others throughout:
-<a href="https://twitter.com/beholdnec">N.E.C.</a>,
-<a href="https://twitter.com/JuPaHe64">JuPaHe64</a>,
-<a href="https://twitter.com/Jawchewa">Jawchewa</a>,
-<a href="https://twitter.com/Starschulz">Starschulz</a>,
-<a href="https://twitter.com/kittensandals">SpaceCats</a>,
-<a href="https://twitter.com/pupperuki">Aruki</a>,
-<a href="https://twitter.com/TanukiMatthew">TanukiMatthew</a>,
-<a href="https://twitter.com/QuadeZaban">Quade Zaban</a>,
-<a href="https://twitter.com/Murugalstudio">Murugo</a>,
-<a href="https://twitter.com/PistonMiner">PistonMiner</a>,
-<a href="https://twitter.com/LordNed">LordNed</a>,
-<a href="https://twitter.com/SageOfMirrors">SageOfMirrors</a>,
-<a href="https://github.com/blank63">blank63</a>,
-<a href="https://twitter.com/StapleButter">StapleButter</a>,
-<a href="https://twitter.com/xdanieldzd">xdanieldzd</a>,
-<a href="https://github.com/vlad001">vlad001</a>,
-<a href="https://twitter.com/Jewelots_">Jewel</a>,
-<a href="https://twitter.com/instant_grat">Instant Grat</a>,
-along with countless others from the modding communities, game reverse
-engineering and research communities, and emulation communities.</p>
-
-<p>All icons you see are from <a href="https://thenounproject.com/">The Noun Project</a>,
-used under Creative Commons CC-BY:</p>
-<ul>
-<li> Truncated Pyramid <span>by</span> Bohdan Burmich
-<li> Images <span>by</span> Creative Stall
-<li> Help <span>by</span> Gregor Cresnar
-<li> Open <span>by</span> Landan Lloyd
-<li> Nightshift <span>by</span> mikicon
-<li> Layer <span>by</span> Chameleon Design
-<li> Sand Clock <span>by</span> James
-<li> Line Chart <span>by</span> Shastry
-<li> Search <span>by</span> Alain W.
-<li> Save <span>by</span> Prime Icons
-<li> Overlap <span>by</span> Zach Bogart
-</ul>
-`;
-
-        const qas = faq.split('##').slice(1).map((qa) => {
-            const firstNewline = qa.indexOf('\n');
-            const question = qa.slice(0, firstNewline).trim();
-            const answer = qa.slice(firstNewline).trim();
-
-            return { question, answer };
-        });
-
-        for (let i = 0; i < qas.length; i++) {
-            const block = document.createElement('div');
-
-            const title = qas[i].question;
-
-            const q = document.createElement('p');
-            q.style.color = '#ccc';
-            q.style.fontWeight = 'bold';
-            q.style.marginTop = '0';
-            q.style.fontSize = '12pt';
-            q.textContent = title;
-            block.appendChild(q);
-            const a = document.createElement('p');
-            a.style.marginBottom = '1.6em';
-            a.innerHTML = qas[i].answer;
-            block.appendChild(a);
-
-            qa.appendChild(block);
-        }
-
-        this.toplevel.appendChild(this.panel);
-
-        this.elem = this.toplevel;
     }
 }
 
@@ -2158,8 +2253,9 @@ export interface Layer {
 }
 
 export class LayerPanel extends Panel {
-    private multiSelect: MultiSelect;
+    public multiSelect: MultiSelect;
     private layers: Layer[] = [];
+    public onlayertoggled: (() => void) | null = null;
 
     constructor(layers: Layer[] | null = null) {
         super();
@@ -2174,6 +2270,8 @@ export class LayerPanel extends Panel {
 
     private _onItemChanged(index: number, visible: boolean): void {
         this.layers[index].setVisible(visible);
+        if (this.onlayertoggled !== null)
+            this.onlayertoggled();
     }
 
     public syncLayerVisibility(): void {
@@ -2186,214 +2284,396 @@ export class LayerPanel extends Panel {
         const strings = layers.map((layer) => layer.name);
         this.multiSelect.setStrings(strings);
         this.syncLayerVisibility();
+        this.setVisible(layers.length > 1);
     }
 }
 
-declare global {
-    interface CSSStyleDeclaration {
-        imageRendering: string;
-    }
-}
-
-class TimeScrubber implements Widget {
-    private pixelsPerSecond: number = 16;
-    private toplevel: HTMLElement;
-    private track: HTMLCanvasElement;
-    private marker: HTMLElement;
-
+class CameraSpeedIndicator implements BottomBarWidget {
     public elem: HTMLElement;
-    public ontimescrub: ((adj: number) => void) | null = null;
+
+    private currentAnimation: Animation | null = null;
 
     constructor() {
-        this.toplevel = document.createElement('div');
-        this.toplevel.style.display = 'block';
-        this.toplevel.style.height = '2em';
-        this.toplevel.style.cursor = 'grab';
-        this.toplevel.style.position = 'relative';
-        this.toplevel.addEventListener('mousedown', (e) => {
-            GlobalGrabManager.takeGrab(this, e, { takePointerLock: true });
-        });
-
-        this.track = document.createElement('canvas');
-        this.track.style.position = 'absolute';
-        this.track.style.left = '0';
-        this.track.style.top = '0';
-        this.track.style.right = '0';
-        this.track.style.bottom = '0';
-        this.track.style.imageRendering = 'crisp-edges';
-        this.toplevel.appendChild(this.track);
-
-        this.marker = document.createElement('div');
-        this.marker.style.position = 'absolute';
-        this.marker.style.left = '50%';
-        this.marker.style.top = '0';
-        this.marker.style.bottom = '0';
-        this.marker.style.marginLeft = '-5px';
-        this.marker.style.backgroundColor = 'rgba(255, 255, 255, 0.6)';
-        this.marker.style.width = '10px';
-        this.marker.style.clipPath = `polygon(0% 0%, 50% 15%, 50% 85%, 0% 100%, 100% 100%, 50% 85%, 50% 15%, 100% 0%)`;
-        this.toplevel.append(this.marker);
-
-        this.elem = this.toplevel;
+        this.elem = document.createElement('div');
+        this.elem.style.opacity = '0';
+        this.elem.style.textShadow = `0 0 8px black`;
+        this.elem.style.padding = '0 8px';
+        this.elem.style.font = 'bold 16px monospace';
+        this.elem.style.color = 'white';
+        this.elem.style.pointerEvents = 'none';
+        this.elem.style.lineHeight = '32px';
     }
 
-    public onMotion(dx: number, dy: number): void {
-        const timeAdjustSeconds = -dx / this.pixelsPerSecond;
-        const timeAdjust = timeAdjustSeconds * 1000;
-
-        if (this.ontimescrub !== null)
-            this.ontimescrub(timeAdjust);
+    public setVisible(v: boolean): void {
+        this.elem.style.display = v ? 'block' : 'none';
     }
 
-    public onGrabReleased(): void {
-        // No need to do much.
+    public setArea(): void {
     }
 
-    public isScrubbing(): boolean {
-        return GlobalGrabManager.hasGrabListener(this);
+    public isAnyPanelExpanded(): boolean {
+        return false;
     }
 
-    public update(sceneTime: number, timeScale: number): void {
-        this.drawTrack(sceneTime);
-    }
+    public setCameraSpeed(v: number, displayIndicator: boolean = true): void {
+        const dispV = Math.max(v, 1);
+        this.elem.textContent = `Camera Speed: ${dispV.toFixed(0)}`;
 
-    protected drawTrack(sceneTime: number): void {
-        const w = this.toplevel.offsetWidth;
-        const h = this.toplevel.offsetHeight;
-        this.track.width = w;
-        this.track.height = h;
+        const pct = `${(dispV / 200) * 100}%`;
+        this.elem.style.backgroundImage = `linear-gradient(to right, ${HIGHLIGHT_COLOR} ${pct}, rgba(0, 0, 0, 0.75) ${pct})`;
 
-        const ctx = this.track.getContext('2d');
+        if (displayIndicator) {
+            if (this.currentAnimation !== null)
+                this.currentAnimation.cancel();
 
-        // sceneTime is in milliseconds.
-        const sceneTimeSeconds = sceneTime / 1000;
-
-        const rad = (w / this.pixelsPerSecond) / 2;
-        // Iterate over all the seconds in this track.
-        const windowTimeLeft = Math.max(sceneTimeSeconds - rad, 0);
-        const windowTimeRight = sceneTimeSeconds + rad;
-
-        for (let t = (windowTimeLeft | 0); t < ((windowTimeRight + 1) | 0); t++) {
-            // Draw notch at time t.
-            const notchX = w/2 + (t - sceneTimeSeconds) * this.pixelsPerSecond;
-
-            if ((t % 5) === 0) {
-                const notchH = 6;
-                ctx.beginPath();
-                ctx.moveTo(notchX, 0);
-                ctx.lineTo(notchX, notchH);
-                ctx.moveTo(notchX, h-notchH);
-                ctx.lineTo(notchX, h);
-                ctx.lineWidth = 2;
-                ctx.strokeStyle = HIGHLIGHT_COLOR;
-                ctx.stroke();
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                const label = '' + (t % 1000);
-                ctx.font = '10pt monospace';
-                ctx.fillStyle = '#aaa';
-                ctx.fillText(label, notchX, h/2);
-            } else {
-                const notchH = 2;
-                ctx.beginPath();
-                ctx.moveTo(notchX, 0);
-                ctx.lineTo(notchX, notchH);
-                ctx.moveTo(notchX, h-notchH);
-                ctx.lineTo(notchX, h);
-                ctx.lineWidth = 2;
-                ctx.strokeStyle = 'rgb(210, 30, 30, 0.8)';
-                ctx.stroke();
-            }
+            this.currentAnimation = this.elem.animate([
+                { opacity: 1, offset: 0 },
+                { opacity: 1, offset: 0.5 },
+                { opacity: 0, offset: 1.0 },
+            ], 2000);
         }
     }
 }
 
-export class TimePanel extends Panel {
-    private scrubber: TimeScrubber;
-    private rewindButton: HTMLElement;
-    private pausePlayButton: HTMLElement;
-    private isPlaying: boolean = true;
-    private normalSceneTimeScale = 1;
+enum BottomBarArea { Left, Center, Right }
 
-    public ontimescrub: ((adj: number) => void) | null = null;
-    public onrewind: (() => void) | null = null;
+function setAreaAnchor(elem: HTMLElement, area: BottomBarArea) {
+    if (area === BottomBarArea.Left) {
+        elem.style.transform = '';
+        elem.style.marginLeft = '';
+        elem.style.right = '';
+    } else if (area === BottomBarArea.Center) {
+        elem.style.transform = 'translate(-50%, 0)';
+        elem.style.marginLeft = '16px';
+        elem.style.right = '';
+    } else if (area === BottomBarArea.Right) {
+        elem.style.transform = '';
+        elem.style.marginLeft = '';
+        elem.style.right = '0';
+    }
+}
+
+interface BottomBarWidget {
+    elem: HTMLElement;
+    setArea(area: BottomBarArea): void;
+    setVisible(v: boolean): void;
+    isAnyPanelExpanded(): boolean;
+}
+
+class BottomBar {
+    public elem: HTMLElement;
+    public widgets: BottomBarWidget[] = [];
+
+    constructor() {
+        this.elem = document.createElement('div');
+        this.elem.id = 'BottomBar';
+        this.elem.style.position = 'absolute';
+        this.elem.style.bottom = '32px';
+        this.elem.style.left = '32px';
+        this.elem.style.right = '32px';
+        this.elem.style.display = 'grid';
+        this.elem.style.gridTemplateColumns = '1fr 1fr 1fr';
+        this.elem.style.gap = '8px';
+        this.elem.style.transition = '.1s ease-out';
+        this.elem.style.pointerEvents = 'none';
+
+        const leftArea = this.newArea();
+        leftArea.style.justifySelf = 'start';
+        this.elem.appendChild(leftArea);
+
+        const centerArea = this.newArea();
+        centerArea.style.justifySelf = 'center';
+        this.elem.appendChild(centerArea);
+
+        const rightArea = this.newArea();
+        rightArea.style.justifySelf = 'end';
+        this.elem.appendChild(rightArea);
+    }
+
+    private newArea(): HTMLElement {
+        const area = document.createElement('div');
+        area.style.display = 'grid';
+        area.style.gridAutoFlow = 'column';
+        area.style.gap = '8px';
+        return area;
+    }
+
+    public addWidgets(area: BottomBarArea, widget: BottomBarWidget): void {
+        widget.setArea(area);
+        this.widgets.push(widget);
+        this.elem.children.item(area)!.appendChild(widget.elem);
+    }
+
+    public isAnyPanelExpanded(): boolean {
+        for (let i = 0; i < this.widgets.length; i++)
+            if (this.widgets[i].isAnyPanelExpanded())
+                return true;
+        return false;
+    }
+
+    public setActive(active: boolean): void {
+        this.elem.style.opacity = active ? '1' : '0';
+    }
+
+    public setVisible(v: boolean): void {
+        this.elem.style.display = v ? 'grid' : 'none';
+    }
+}
+
+abstract class SingleIconButton implements BottomBarWidget {
+    public elem: HTMLElement;
+    public icon: HTMLElement;
+    public tooltipElem: HTMLElement;
+    public isOpen: boolean = false;
+    public isHover: boolean = false;
+
+    constructor() {
+        this.elem = document.createElement('div');
+        this.elem.style.position = 'relative';
+        this.elem.style.transition = '.1s ease-out';
+        this.elem.style.width = '32px';
+        this.elem.style.height = '32px';
+        this.elem.style.pointerEvents = 'auto';
+        this.elem.onclick = this.onClick.bind(this);
+        this.elem.onmouseover = () => {
+            this.isHover = true;
+            this.syncStyle();
+        };
+        this.elem.onmouseout = () => {
+            this.isHover = false;
+            this.syncStyle();
+        };
+
+        this.icon = document.createElement('div');
+        this.icon.style.width = '32px';
+        this.icon.style.height = '32px';
+        this.icon.style.cursor = 'pointer';
+        this.icon.style.font = '16px monospace';
+        this.icon.style.color = 'white';
+        this.icon.style.lineHeight = '32px';
+        this.icon.style.textAlign = 'center';
+        this.icon.style.textShadow = '0px 0px 6px rgba(0, 0, 0, 0.5)';
+        this.icon.style.transition = '0.1s ease-out';
+        this.icon.style.userSelect = 'none';
+        this.elem.appendChild(this.icon);
+
+        this.tooltipElem = document.createElement('div');
+        this.tooltipElem.style.position = 'absolute';
+        this.tooltipElem.style.top = '0';
+        this.tooltipElem.style.marginTop = '-32px';
+        this.tooltipElem.style.padding = '0 8px';
+        this.tooltipElem.style.background = 'rgba(0, 0, 0, 0.75)';
+        this.tooltipElem.style.font = 'bold 16px monospace';
+        this.tooltipElem.style.lineHeight = '32px';
+        this.tooltipElem.style.color = 'white';
+        this.tooltipElem.style.textShadow = `0 0 8px black`;
+        this.tooltipElem.style.transition = '0.1s ease-out';
+        this.tooltipElem.style.pointerEvents = 'none';
+        this.tooltipElem.style.userSelect = 'none';
+        this.tooltipElem.style.opacity = '0';
+        this.elem.appendChild(this.tooltipElem);
+    }
+
+    public setShow(v: boolean): void {
+        this.elem.style.display = v ? 'block' : 'none';
+    }
+
+    public setArea(area: BottomBarArea): void {
+        setAreaAnchor(this.tooltipElem, area);
+    }
+
+    public setVisible(v: boolean): void {
+        this.elem.style.display = v ? 'block' : 'none';
+    }
+
+    public isAnyPanelExpanded(): boolean {
+        return this.isOpen;
+    }
+
+    public abstract onClick(e: MouseEvent): void;
+
+    public setIsOpen(v: boolean): void {
+        this.isOpen = v;
+        this.syncStyle();
+    }
+
+    public syncStyle(): void {
+        if (this.isOpen) {
+            this.icon.style.background = 'rgba(0, 0, 0, 0.75)';
+            this.icon.style.color = HIGHLIGHT_COLOR;
+            this.tooltipElem.style.opacity = '0';
+        } else if (this.isHover) {
+            this.icon.style.background = 'rgba(0, 0, 0, 0.75)';
+            this.icon.style.color = 'white';
+            this.tooltipElem.style.opacity = '1';
+        } else {
+            this.icon.style.background = 'rgba(0, 0, 0, 0.0)';
+            this.icon.style.color = 'white';
+            this.tooltipElem.style.opacity = '0';
+        }
+    }
+}
+
+class PanelButton extends SingleIconButton {
+    protected panel: HTMLElement;
 
     constructor() {
         super();
-        this.setTitle(SAND_CLOCK_ICON, 'Time');
 
-        this.scrubber = new TimeScrubber();
-        this.scrubber.ontimescrub = (adj: number) => {
-            if (this.ontimescrub !== null)
-                this.ontimescrub(adj);
-        };
-        this.contents.appendChild(this.scrubber.elem);
+        this.panel = document.createElement('div');
+        this.panel.style.position = 'absolute';
+        this.panel.style.top = '0';
+        this.panel.style.marginTop = '-32px';
+        this.panel.style.lineHeight = '32px';
+        this.panel.style.background = 'rgba(0, 0, 0, 0.75)';
+        this.panel.style.transition = '0.1s ease-out';
 
-        const h = document.createElement('div');
-        h.style.display = 'grid';
-        h.style.gridAutoFlow = 'column';
-        h.style.gridGap = '8px';
+        this.elem.appendChild(this.panel);
 
-        this.rewindButton = document.createElement('div');
-        this.rewindButton.style.textAlign = 'center';
-        this.rewindButton.style.lineHeight = '1.5em';
-        this.rewindButton.style.userSelect = 'none';
-        this.rewindButton.style.cursor = 'pointer';
-        this.rewindButton.style.fontWeight = 'bold';
-        this.rewindButton.style.backgroundColor = COOL_BLUE_COLOR;
-        this.rewindButton.textContent = 'Rewind';
-        this.rewindButton.onclick = () => {
-            if (this.onrewind !== null)
-                this.onrewind();
-        };
-        h.appendChild(this.rewindButton);
-
-        this.pausePlayButton = document.createElement('div');
-        this.pausePlayButton.style.textAlign = 'center';
-        this.pausePlayButton.style.lineHeight = '1.5em';
-        this.pausePlayButton.style.userSelect = 'none';
-        this.pausePlayButton.style.cursor = 'pointer';
-        this.pausePlayButton.style.fontWeight = 'bold';
-        this.pausePlayButton.style.backgroundColor = COOL_BLUE_COLOR;
-        this.pausePlayButton.onclick = () => {
-            this.togglePausePlay();
-        };
-        h.appendChild(this.pausePlayButton);
-
-        this.sync();
-
-        this.contents.appendChild(h);
+        this.syncStyle();
     }
 
-    private sync(): void {
-        if (this.isPlaying) {
-            this.pausePlayButton.textContent = 'Pause';
-        } else {
-            this.pausePlayButton.textContent = 'Play';
+    public override setArea(area: BottomBarArea): void {
+        super.setArea(area);
+        setAreaAnchor(this.panel, area);
+    }
+
+    public onClick(e: MouseEvent): void {
+        if (!this.isOpen) {
+            this.setIsOpen(true);
+            GlobalGrabManager.takeGrab(this, e, { takePointerLock: false, useGrabbingCursor: false, releaseOnMouseUp: false, grabElement: this.panel });
         }
     }
 
-    public getTimeScale(): number {
-        if (this.scrubber.isScrubbing())
-            return 0;
-
-        if (!this.isPlaying)
-            return 0;
-
-        return this.normalSceneTimeScale;
+    public onMotion(): void {
+        // Doesn't matter.
     }
 
-    public togglePausePlay(): void {
-        this.isPlaying = !this.isPlaying;
-        this.sync();
+    public onGrabReleased(): void {
+        this.setIsOpen(false);
     }
 
-    public update(sceneTime: number, timeScale: number): void {
-        // Expensive, so prevent it if we can help it...
-        if (!this.expanded)
+    public override syncStyle(): void {
+        super.syncStyle();
+
+        if (this.isOpen) {
+            this.panel.style.opacity = '1';
+            this.panel.style.pointerEvents = '';
+        } else {
+            this.panel.style.opacity = '0';
+            this.panel.style.pointerEvents = 'none';
+        }
+    }
+}
+
+class ShareButton extends PanelButton {
+    public currentShareURLEntry: TextField;
+    public copyButton: HTMLElement;
+    private copyButtonState: 'copy' | 'copied';
+
+    constructor() {
+        super();
+        this.tooltipElem.textContent = 'Share';
+        setFontelloIcon(this.icon, FontelloIcon.share);
+
+        this.panel.style.display = 'grid';
+        this.panel.style.width = '400px';
+        this.panel.style.gridAutoFlow = 'column';
+
+        this.currentShareURLEntry = new TextField();
+        this.currentShareURLEntry.textarea.readOnly = true;
+        this.currentShareURLEntry.textarea.onfocus = () => {
+            this.currentShareURLEntry.selectAll();
+        };
+        this.currentShareURLEntry.elem.style.width = 'auto';
+        this.currentShareURLEntry.elem.style.lineHeight = '32px';
+        this.currentShareURLEntry.elem.style.padding = '0 16px';
+        this.panel.appendChild(this.currentShareURLEntry.elem);
+
+        this.copyButton = document.createElement('div');
+        this.copyButton.style.font = '16px monospace';
+        this.copyButton.style.textShadow = '0px 0px 6px rgba(0, 0, 0, 0.5)';
+        this.copyButton.style.color = 'white';
+        this.copyButton.style.lineHeight = '32px';
+        this.copyButton.style.textAlign = 'center';
+        this.copyButton.style.userSelect = 'none';
+        this.copyButton.onclick = () => {
+            if (this.copyButtonState === 'copy') {
+                window.navigator.clipboard.writeText(this.currentShareURLEntry.getValue());
+                this.currentShareURLEntry.selectAll();
+                this.setCopyButtonState('copied');
+            }
+        };
+        this.setCopyButtonState('copy');
+        this.panel.appendChild(this.copyButton);
+    }
+
+    private setCopyButtonState(state: 'copy' | 'copied'): void {
+        if (this.copyButtonState === state)
             return;
+        this.copyButtonState = state;
+        if (state === 'copy') {
+            this.copyButton.style.backgroundColor = HIGHLIGHT_COLOR;
+            this.copyButton.style.cursor = 'pointer';
+            this.copyButton.textContent = 'COPY';
+        } else {
+            this.copyButton.style.backgroundColor = '#666';
+            this.copyButton.style.cursor = '';
+            this.copyButton.textContent = 'COPIED';
+        }
+    }
 
-        this.scrubber.update(sceneTime, timeScale);
+    public setShareURL(shareURL: string) {
+        this.setCopyButtonState('copy');
+        this.currentShareURLEntry.setValue(shareURL);
+    }
+}
+
+class FullscreenButton extends SingleIconButton {
+    constructor() {
+        super();
+        if (document.body.requestFullscreen === undefined)
+            this.setShow(false);
+        document.addEventListener('fullscreenchange', this.syncStyle.bind(this));
+        this.syncStyle();
+    }
+
+    private isFS() {
+        return document.fullscreenElement === document.body;
+    }
+
+    public override syncStyle() {
+        super.syncStyle();
+        setFontelloIcon(this.icon, this.isFS() ? FontelloIcon.resize_small : FontelloIcon.resize_full);
+        this.tooltipElem.textContent = this.isFS() ? 'Unfullscreen' : 'Fullscreen';
+    }
+
+    public onClick() {
+        if (this.isFS())
+            document.exitFullscreen();
+        else
+            document.body.requestFullscreen();
+    }
+}
+
+class PlayPauseButton extends SingleIconButton {
+    public onplaypause: ((shouldBePlaying: boolean) => void) | null = null;
+    public isPlaying: boolean;
+
+    public override syncStyle(): void {
+        super.syncStyle();
+        setFontelloIcon(this.icon, this.isPlaying ? FontelloIcon.pause : FontelloIcon.play);
+        this.tooltipElem.textContent = this.isPlaying ? 'Pause' : 'Play';
+    }
+
+    public setIsPlaying(isPlaying: boolean): void {
+        this.isPlaying = isPlaying;
+        this.syncStyle();
+    }
+
+    public onClick() {
+        if (this.onplaypause !== null)
+            this.onplaypause(!this.isPlaying);
     }
 }
 
@@ -2405,21 +2685,35 @@ export class UI {
     public dragHighlight: HTMLElement;
     public sceneUIContainer: HTMLElement;
 
-    private floatingPanelContainer: HTMLElement;
-    private floatingPanels: FloatingPanel[] = [];
-
     private panelToplevel: HTMLElement;
     private panelContainer: HTMLElement;
 
     public sceneSelect: SceneSelect;
-    public saveStatesPanel: SaveStatesPanel;
     public textureViewer: TextureViewer;
     public viewerSettings: ViewerSettings;
+    public xrSettings: XRSettings;
     public statisticsPanel: StatisticsPanel;
-    public timePanel: TimePanel;
     public panels: Panel[];
     private about: About;
-    private faqPanel: FAQPanel;
+    private studioSidePanel: StudioSidePanel;
+    private studioPanel: StudioPanel;
+
+    public cameraSpeedIndicator = new CameraSpeedIndicator();
+    private bottomBar = new BottomBar();
+    public playPauseButton = new PlayPauseButton();
+    private shareButton = new ShareButton();
+    private fullscreenButton = new FullscreenButton();
+
+    public debugFloaterHolder = new DebugFloaterHolder();
+
+    private isDragging: boolean = false;
+    private lastMouseActiveTime: number = -1;
+
+    public isEmbedMode: boolean = false;
+    public isVisible: boolean = true;
+    public hasScene: boolean = false;
+
+    public studioModeEnabled: boolean = false;
 
     constructor(public viewer: Viewer.Viewer) {
         this.toplevel = document.createElement('div');
@@ -2429,6 +2723,7 @@ export class UI {
         this.toplevel.appendChild(this.sceneUIContainer);
 
         this.panelToplevel = document.createElement('div');
+        this.panelToplevel.id = 'Panel';
         this.panelToplevel.style.position = 'absolute';
         this.panelToplevel.style.left = '0';
         this.panelToplevel.style.top = '0';
@@ -2448,7 +2743,7 @@ export class UI {
         this.panelContainer = document.createElement('div');
         this.panelContainer.style.display = 'grid';
         this.panelContainer.style.gridTemplateColumns = '1fr';
-        this.panelContainer.style.gridGap = '20px';
+        this.panelContainer.style.gap = '20px';
         this.panelToplevel.appendChild(this.panelContainer);
 
         this.toplevel.appendChild(this.panelToplevel);
@@ -2465,46 +2760,86 @@ export class UI {
         this.dragHighlight.style.display = 'none';
         this.dragHighlight.style.pointerEvents = 'none';
 
-        this.floatingPanelContainer = document.createElement('div');
-        this.toplevel.appendChild(this.floatingPanelContainer);
+        this.toplevel.appendChild(this.debugFloaterHolder.elem);
 
-        this.sceneSelect = new SceneSelect(viewer);
-        this.saveStatesPanel = new SaveStatesPanel(viewer.inputManager);
+        this.toplevel.appendChild(this.bottomBar.elem);
+        this.bottomBar.addWidgets(BottomBarArea.Left, this.cameraSpeedIndicator);
+        this.bottomBar.addWidgets(BottomBarArea.Center, this.playPauseButton);
+        this.bottomBar.addWidgets(BottomBarArea.Right, this.shareButton);
+        this.bottomBar.addWidgets(BottomBarArea.Right, this.fullscreenButton);
+
+        this.sceneSelect = new SceneSelect();
         this.textureViewer = new TextureViewer();
-        this.viewerSettings = new ViewerSettings(viewer);
-        this.statisticsPanel = new StatisticsPanel(viewer);
-        this.timePanel = new TimePanel();
+        this.viewerSettings = new ViewerSettings(this);
+        this.xrSettings = new XRSettings(this, viewer);
+        this.statisticsPanel = new StatisticsPanel();
         this.about = new About();
 
-        this.about.onfaq = () => {
-            this._onFAQ();
-        };
+        this.studioSidePanel = new StudioSidePanel(this);
+        this.studioPanel = new StudioPanel(this);
+        this.toplevel.appendChild(this.studioPanel.elem);
 
-        this.faqPanel = new FAQPanel();
-        this.faqPanel.elem.style.display = 'none';
-        this.toplevel.appendChild(this.faqPanel.elem);
+        this.viewerSettings.setViewer(viewer);
+        this.studioPanel.setViewer(viewer);
+
+        window.onmousemove = () => {
+            this.setMouseActive();
+        };
+        this.setMouseActive();
 
         this.setScenePanels(null);
 
         this.elem = this.toplevel;
     }
 
-    private _onFAQ(): void {
-        this.faqPanel.elem.style.display = 'block';
+    public setViewer(viewer: Viewer.Viewer): void {
+        if (this.viewer === viewer)
+            return;
+
+        this.viewer = viewer;
+        this.viewerSettings.setViewer(this.viewer);
+        this.studioPanel.setViewer(this.viewer);
+
+        this.xrSettings = new XRSettings(this, this.viewer);
+    }
+
+    public setIsPlaying(v: boolean): void {
+        this.playPauseButton.setIsPlaying(v);
+    }
+
+    public toggleWebXRCheckbox(shouldBeChecked: boolean = !this.xrSettings.enableXRCheckBox.checked) {
+        this.xrSettings.enableXRCheckBox.setChecked(shouldBeChecked);
+    }
+
+    public setMouseActive(): void {
+        this.lastMouseActiveTime = window.performance.now();
+    }
+
+    public update(): void {
+        this.syncVisibilityState();
+    }
+
+    public setShareSaveState(saveState: string) {
+        const shareURL = buildShareURL(saveState);
+        this.shareButton.setShareURL(shareURL);
     }
 
     public sceneChanged() {
         const cameraControllerClass = this.viewer.cameraController!.constructor as CameraControllerClass;
         this.viewerSettings.cameraControllerSelected(cameraControllerClass);
+        this.viewerSettings.setupFromCamera(this.viewer.cameraController!, this.viewer.camera);
 
         // Textures
         if (this.viewer.scene !== null) {
             const scene = this.viewer.scene;
             if (scene.textureHolder !== undefined)
-                this.textureViewer.setTextureHolder(scene.textureHolder);
+                this.textureViewer.setTextureList(scene.textureHolder);
             else
-                this.textureViewer.setTextureList([]);
+                this.textureViewer.setTextureList(null);
         }
+
+        if (this.studioModeEnabled)
+            this.studioPanel.onSceneChange();
     }
 
     private setPanels(panels: Panel[]): void {
@@ -2513,17 +2848,27 @@ export class UI {
     }
 
     public destroyScene(): void {
+        this.setScenePanels([]);
         setChildren(this.sceneUIContainer, []);
+        this.debugFloaterHolder.destroyScene();
+    }
 
-        for (let i = 0; i < this.floatingPanels.length; i++)
-            this.floatingPanels[i].destroy();
+    private setHasScene(v: boolean): void {
+        if (this.hasScene === v)
+            return;
+
+        this.hasScene = v;
+        this.syncVisibilityState();
     }
 
     public setScenePanels(scenePanels: Panel[] | null): void {
-        if (scenePanels !== null)
-            this.setPanels([this.sceneSelect, ...scenePanels, this.textureViewer, this.timePanel, this.saveStatesPanel, this.viewerSettings, this.statisticsPanel, this.about]);
-        else
+        this.setHasScene(scenePanels !== null);
+
+        if (scenePanels !== null) {
+            this.setPanels([this.sceneSelect, ...scenePanels, this.textureViewer, this.viewerSettings, this.xrSettings, this.statisticsPanel, this.studioSidePanel, this.about]);
+        } else {
             this.setPanels([this.sceneSelect, this.about]);
+        }
     }
 
     public setPanelsAutoClosed(v: boolean): void {
@@ -2538,76 +2883,75 @@ export class UI {
         return true;
     }
 
-    public setIsDragging(isDragging: boolean): void {
-        this.elem.style.pointerEvents = isDragging ? 'none' : '';
+    private shouldBottomBarBeFadeIn(): boolean {
+        if (this.bottomBar.isAnyPanelExpanded())
+            return true;
+
+        if (this.isDragging)
+            return true;
+
+        // Hide after one second of mouse inactivity
+        const lastMouseActiveHideThreshold = 1000;
+        if (window.performance.now() > this.lastMouseActiveTime + lastMouseActiveHideThreshold)
+            return false;
+
+        return true;
+    }
+
+    public setDraggingMode(draggingMode: DraggingMode): void {
+        const isDragging = draggingMode !== DraggingMode.None;
+        const isPointerLocked = draggingMode === DraggingMode.PointerLocked;
+
+        this.isDragging = isDragging;
+        this.elem.style.pointerEvents = (isDragging && !isPointerLocked) ? 'none' : '';
         if (isDragging && this.shouldPanelsAutoClose())
             this.setPanelsAutoClosed(true);
+        this.syncVisibilityState();
     }
 
-    public makeFloatingPanel(title: string = 'Floating Panel', icon: string = RENDER_HACKS_ICON): FloatingPanel {
-        const panel = new FloatingPanel();
-        panel.setWidth(600);
-        panel.setTitle(icon, title);
-        this.floatingPanelContainer.appendChild(panel.elem);
-        this.floatingPanels.push(panel);
-        return panel;
+    private syncVisibilityState(): void {
+        const panelsVisible = !this.isEmbedMode && this.isVisible;
+        this.panelToplevel.style.display = panelsVisible ? '' : 'none';
+
+        const bottomBarVisible = this.isVisible;
+        this.bottomBar.setVisible(bottomBarVisible);
+        this.bottomBar.setActive(this.shouldBottomBarBeFadeIn());
+
+        this.playPauseButton.setVisible(this.hasScene);
+
+        const extraButtonsVisible = !this.isEmbedMode;
+        this.cameraSpeedIndicator.setVisible(extraButtonsVisible);
+        this.shareButton.setVisible(extraButtonsVisible && this.hasScene);
     }
 
-    private debugFloater: FloatingPanel | null = null;
-    private getDebugFloater(): FloatingPanel {
-        if (this.debugFloater === null)
-            this.debugFloater = this.makeFloatingPanel('Debug');
-        return this.debugFloater;
+    public setEmbedMode(v: boolean): void {
+        if (this.isEmbedMode === v)
+            return;
+
+        this.isEmbedMode = v;
+        this.syncVisibilityState();
     }
 
-    public bindSlider(obj: { [k: string]: number }, paramName: string, min = 0, max = 1, labelName: string = paramName, panel: FloatingPanel): void {
-        let value = obj[paramName];
-        assert(typeof value === "number");
+    public toggleUI(v: boolean = !this.isVisible): void {
+        if (this.isVisible === v)
+            return;
 
-        const slider = new Slider();
-        slider.onvalue = (newValue: number) => {
-            obj[paramName] = newValue;
-            window.debugObj = obj;
-            update();
-        };
-        update();
-
-        function update() {
-            value = obj[paramName];
-            slider.setLabel(`${labelName} = ${value.toFixed(2)}`);
-            min = Math.min(value, min);
-            max = Math.max(value, max);
-            slider.setRange(min, max);
-            slider.setValue(value);
-        }
-
-        setInterval(() => {
-            if (obj[paramName] !== value)
-                update();
-        }, 100);
-
-        panel.contents.appendChild(slider.elem);
+        this.isVisible = v;
+        this.syncVisibilityState();
     }
 
-    private bindSlidersRecurse(obj: { [k: string]: any }, parentName: string, panel: FloatingPanel): void {
-        for (const keyName in obj) {
-            const v = obj[keyName];
-            if (typeof v === "number")
-                this.bindSlider(obj, keyName, 0, 1, `${parentName}.${keyName}`, panel);
-            if (v instanceof Float32Array)
-                this.bindSlidersRecurse(v, `${parentName}.${keyName}`, panel);
-        }
+    public enableStudioMode(): void {
+        // Switch to the FPS Camera Controller (so the UI shows the correct controller highlighted).
+        this.viewerSettings.setCameraControllerIndex(0);
+        this.studioPanel.initStudio();
+        this.studioPanel.show();
+        this.viewer.setCameraController(this.studioPanel.studioCameraController);
+        this.studioModeEnabled = true;
     }
 
-    public bindSliders(obj: { [k: string]: any }, panel: FloatingPanel | null = null): void {
-        if (panel === null)
-            panel = this.getDebugFloater();
-
-        while (panel.contents.firstChild)
-            panel.contents.removeChild(panel.contents.firstChild);
-
-        this.bindSlidersRecurse(obj, '', panel);
-
-        window.debugObj = obj;
+    public disableStudioMode(): void {
+        this.studioModeEnabled = false;
+        this.viewerSettings.setCameraControllerIndex(0);
+        this.studioPanel.hide();
     }
 }

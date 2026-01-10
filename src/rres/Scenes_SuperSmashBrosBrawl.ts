@@ -1,17 +1,17 @@
 
-import * as Viewer from '../viewer';
-import * as BRRES from './brres';
-import * as CX from "../compression/CX";
-import * as UI from '../ui';
+import * as Viewer from '../viewer.js';
+import * as BRRES from './brres.js';
+import * as CX from "../Common/Compression/CX.js";
+import * as UI from '../ui.js';
 
-import ArrayBufferSlice from "../ArrayBufferSlice";
-import { assert, readString, align } from "../util";
-import { GfxDevice, GfxHostAccessPass } from '../gfx/platform/GfxPlatform';
-import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from './render';
-import AnimationController from '../AnimationController';
-import { GXMaterialHacks } from '../gx/gx_material';
-import { BasicGXRendererHelper } from '../gx/gx_render';
-import { SceneContext } from '../SceneBase';
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { assert, readString, align } from "../util.js";
+import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
+import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from './render.js';
+import AnimationController from '../AnimationController.js';
+import { GXMaterialHacks } from '../gx/gx_material.js';
+import { BasicGXRendererHelper, fillSceneParamsDataOnTemplate } from '../gx/gx_render.js';
+import { SceneContext } from '../SceneBase.js';
 
 interface ARCFileEntry {
     fileType: number;
@@ -90,34 +90,32 @@ class BrawlRenderer extends BasicGXRendererHelper {
         return panels;
     }
 
-    protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    protected prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
         this.animationController.setTimeInMilliseconds(viewerInput.time);
         const template = this.renderHelper.pushTemplateRenderInst();
-        this.renderHelper.fillSceneParams(viewerInput, template);
+        fillSceneParamsDataOnTemplate(template, viewerInput);
         for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
-        this.renderHelper.prepareToRender(device, hostAccessPass);
-        this.renderHelper.renderInstManager.popTemplateRenderInst();
+            this.modelInstances[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput);
+        this.renderHelper.prepareToRender();
+        this.renderHelper.renderInstManager.popTemplate();
     }
 
-    public destroy(device: GfxDevice): void {
+    public override destroy(device: GfxDevice): void {
         super.destroy(device);
 
         this.textureHolder.destroy(device);
-        this.renderHelper.destroy(device);
 
         for (let i = 0; i < this.models.length; i++)
             this.models[i].destroy(device);
-        for (let i = 0; i < this.modelInstances.length; i++)
-            this.modelInstances[i].destroy(device);
     }
 }
 
+const pathBase = `SuperSmashBrosBrawl`;
 class BrawlSceneDesc implements Viewer.SceneDesc {
     constructor(public id: string, public name: string) {}
 
     public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
-        return context.dataFetcher.fetchData(`ssbb/stage/${this.id}`).then((buffer: ArrayBufferSlice) => {
+        return context.dataFetcher.fetchData(`${pathBase}/stage/${this.id}`).then((buffer: ArrayBufferSlice) => {
             const textureHolder = new RRESTextureHolder();
 
             const arc = parseARC(buffer);
@@ -398,7 +396,7 @@ const sceneDescs = [
     new BrawlSceneDesc('adventure/420002a.pac', 'The Great Maze Save 2-1'),
     new BrawlSceneDesc('adventure/420002b.pac', 'The Great Maze Save 2-2'),
     new BrawlSceneDesc('adventure/420002c.pac', 'The Great Maze Save 2-3'),
-    new BrawlSceneDesc('adventure/420002d.pac', 'The Greaet Maze Save 2-4'),
+    new BrawlSceneDesc('adventure/420002d.pac', 'The Great Maze Save 2-4'),
     new BrawlSceneDesc('adventure/420002e.pac', 'The Great Maze Save 2-5'),
     new BrawlSceneDesc('adventure/420003a.pac', 'The Great Maze Stadium'),
     new BrawlSceneDesc('adventure/420005a.pac', 'adventure/420005a.pac'),

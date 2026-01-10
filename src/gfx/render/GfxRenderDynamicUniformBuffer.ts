@@ -1,93 +1,111 @@
 
-import { GfxBuffer, GfxDevice, GfxHostAccessPass, GfxBufferUsage, GfxBufferFrequencyHint } from "../platform/GfxPlatform";
-import { assert, assertExists, alignNonPowerOfTwo } from "../../util";
-
-// TODO(jstpierre): Maybe this makes more sense as a native platform object
+import { GfxBuffer, GfxDevice, GfxBufferUsage, GfxBufferFrequencyHint } from "../platform/GfxPlatform.js";
+import { assert, assertExists, alignNonPowerOfTwo } from "../platform/GfxPlatformUtil.js";
 
 // This is a very basic linear allocator. We allocate offsets in-order.
 export class GfxRenderDynamicUniformBuffer {
-    private uniformBufferWordAlignment: number;
-    private uniformBufferMaxPageWordSize: number;
+    private uniformBufferByteAlignment: number;
+    private uniformBufferMaxPageByteSize: number;
 
-    private currentBufferWordSize: number = -1;
-    private currentWordOffset: number = 0;
+    private currentBufferByteSize: number = -1;
+    private currentByteOffset: number = 0;
     public gfxBuffer: GfxBuffer | null = null;
 
     private shadowBufferF32: Float32Array | null = null;
-    private shadowBufferU8: Uint8Array | null = null;
+    private shadowBufferU8: Uint8Array<ArrayBuffer> | null = null;
 
-    constructor(device: GfxDevice) {
+    constructor(private device: GfxDevice) {
         const limits = device.queryLimits();
-        this.uniformBufferWordAlignment = limits.uniformBufferWordAlignment;
-        this.uniformBufferMaxPageWordSize = limits.uniformBufferMaxPageWordSize;
+        this.uniformBufferByteAlignment = limits.uniformBufferByteAlignment;
+        this.uniformBufferMaxPageByteSize = limits.uniformBufferMaxPageByteSize;
     }
 
-    private findPageIndex(wordOffset: number): number {
-        return (wordOffset / this.uniformBufferMaxPageWordSize) | 0;
+    private findPageIndex(byteOffset: number): number {
+        return (byteOffset / this.uniformBufferMaxPageByteSize * 4) | 0;
     }
 
     public allocateChunk(wordCount: number): number {
-        wordCount = alignNonPowerOfTwo(wordCount, this.uniformBufferWordAlignment);
-        assert(wordCount < this.uniformBufferMaxPageWordSize);
+        wordCount = alignNonPowerOfTwo(wordCount, this.uniformBufferByteAlignment);
 
-        let wordOffset = this.currentWordOffset;
+        const byteSize = wordCount * 4;
+        assert(byteSize <= this.uniformBufferMaxPageByteSize);
+        let byteOffset = this.currentByteOffset;
 
         // If we straddle the page, then put it at the start of the next one.
-        if (this.findPageIndex(wordOffset) !== this.findPageIndex(wordOffset + wordCount - 1))
-            wordOffset = alignNonPowerOfTwo(wordOffset, this.uniformBufferMaxPageWordSize);
+        if (this.findPageIndex(byteOffset) !== this.findPageIndex(byteOffset + byteSize - 1))
+            byteOffset = alignNonPowerOfTwo(byteOffset, this.uniformBufferMaxPageByteSize);
 
-        this.currentWordOffset = wordOffset + wordCount;
+        this.currentByteOffset = byteOffset + byteSize;
+        this.ensureShadowBuffer(byteOffset, byteSize);
+
+        // Make sure it's always a word offset.
+        const wordOffset = byteOffset >> 2;
         return wordOffset;
     }
 
-    private ensureShadowBuffer(wordOffset: number, wordCount: number): void {
-        if (this.shadowBufferU8 === null || this.shadowBufferF32 === null) {
-            const newWordCount = alignNonPowerOfTwo(this.currentWordOffset, this.uniformBufferMaxPageWordSize);
-            this.shadowBufferU8 = new Uint8Array(newWordCount * 4);
-            this.shadowBufferF32 = new Float32Array(this.shadowBufferU8.buffer);
-        } else if (wordOffset + wordCount >= this.shadowBufferF32.length) {
-            assert(wordOffset < this.currentWordOffset && wordOffset + wordCount <= this.currentWordOffset);
+    private ensureShadowBuffer(byteOffset: number, byteSize: number): void {
+        if (this.shadowBufferU8 === null) {
+            const newWordCount = alignNonPowerOfTwo(this.currentByteOffset, this.uniformBufferMaxPageByteSize);
+            const buffer = new ArrayBuffer(newWordCount << 2);
+            this.shadowBufferU8 = new Uint8Array(buffer);
+            this.shadowBufferF32 = new Float32Array(buffer);
+        } else if (byteOffset + byteSize >= this.shadowBufferF32!.byteLength) {
+            assert(byteOffset < this.currentByteOffset && byteOffset + byteSize <= this.currentByteOffset);
 
             // Grow logarithmically, aligned to page size.
-            const newWordCount = alignNonPowerOfTwo(Math.max(this.currentWordOffset, this.shadowBufferF32.length * 2), this.uniformBufferMaxPageWordSize);
-            const newBuffer = new Uint8Array(newWordCount * 4);
+            const newByteSize = alignNonPowerOfTwo(Math.max(this.currentByteOffset, this.shadowBufferF32!.length * 2), this.uniformBufferMaxPageByteSize);
+            const buffer = this.shadowBufferU8.buffer;
+            const newBuffer = buffer.transfer(newByteSize);
 
-            newBuffer.set(this.shadowBufferU8, 0);
-            this.shadowBufferU8 = newBuffer;
-            this.shadowBufferF32 = new Float32Array(this.shadowBufferU8.buffer);
+            this.shadowBufferU8 = new Uint8Array(newBuffer);
+            this.shadowBufferF32 = new Float32Array(newBuffer);
+
+            if (!(this.currentByteOffset <= newByteSize))
+                throw new Error(`Assert fail: this.currentWordOffset [${this.currentByteOffset}] <= newWordCount [${newByteSize}]`);
         }
     }
 
-    // TODO(jstpierre): This API is kind of bad for initial performance...
-    public mapBufferF32(wordOffset: number, wordCount: number): Float32Array {
-        this.ensureShadowBuffer(wordOffset, wordCount);
-        return assertExists(this.shadowBufferF32);
+    /**
+     * Return the CPU data buffer used internally. Fill this in to submit data to the CPU. Write to
+     * it with the offset that was returned from {@see allocateChunk}.
+     */
+    public mapBufferF32(): Float32Array {
+        return this.shadowBufferF32!;
     }
 
-    public prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass): void {
+    public prepareToRender(): void {
+        if (this.shadowBufferF32 === null) {
+            // Nothing to do.
+            return;
+        }
+
         const shadowBufferF32 = assertExists(this.shadowBufferF32);
 
-        if (shadowBufferF32.length !== this.currentBufferWordSize) {
-            this.currentBufferWordSize = shadowBufferF32.length;
+        if (shadowBufferF32.byteLength !== this.currentBufferByteSize) {
+            this.currentBufferByteSize = shadowBufferF32.byteLength;
 
             if (this.gfxBuffer !== null)
-                device.destroyBuffer(this.gfxBuffer);
+                this.device.destroyBuffer(this.gfxBuffer);
 
-            this.gfxBuffer = device.createBuffer(this.currentBufferWordSize, GfxBufferUsage.UNIFORM, GfxBufferFrequencyHint.DYNAMIC);
+            this.gfxBuffer = this.device.createBuffer(this.currentBufferByteSize, GfxBufferUsage.Uniform, GfxBufferFrequencyHint.Dynamic);
+            this.device.setResourceName(this.gfxBuffer, `GfxRenderDynamicUniformBuffer`);
         }
 
-        const wordCount = alignNonPowerOfTwo(this.currentWordOffset, this.uniformBufferMaxPageWordSize);
+        const byteSize = alignNonPowerOfTwo(this.currentByteOffset, this.uniformBufferMaxPageByteSize);
+        if (!(byteSize <= this.currentBufferByteSize))
+            throw new Error(`Assert fail: byteSize [${byteSize}] (${this.currentByteOffset} aligned ${this.uniformBufferMaxPageByteSize}) <= this.currentBufferByteSize [${this.currentBufferByteSize}]`);
+
         const gfxBuffer = assertExists(this.gfxBuffer);
-        hostAccessPass.uploadBufferData(gfxBuffer, 0, this.shadowBufferU8!, 0, wordCount);
+        this.device.uploadBufferData(gfxBuffer, 0, this.shadowBufferU8!, 0, byteSize);
 
         // Reset the offset for next frame.
         // TODO(jstpierre): Should this be a separate step?
-        this.currentWordOffset = 0;
+        this.currentByteOffset = 0;
     }
 
-    public destroy(device: GfxDevice): void {
+    public destroy(): void {
         if (this.gfxBuffer !== null)
-            device.destroyBuffer(this.gfxBuffer);
+            this.device.destroyBuffer(this.gfxBuffer);
 
         this.shadowBufferF32 = null;
         this.shadowBufferU8 = null;

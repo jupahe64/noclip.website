@@ -1,20 +1,19 @@
 
-import * as Viewer from '../viewer';
+import * as Viewer from '../viewer.js';
 
-import { createModelInstance, BasicRenderer } from './scenes';
-import * as Yaz0 from '../compression/Yaz0';
+import { createModelInstance, BasicRenderer } from './scenes.js';
+import * as Yaz0 from '../Common/Compression/Yaz0.js';
 
-import ArrayBufferSlice from '../ArrayBufferSlice';
-import { assertExists } from '../util';
+import ArrayBufferSlice from '../ArrayBufferSlice.js';
+import { assertExists } from '../util.js';
 import { mat4, } from 'gl-matrix';
-import * as RARC from './rarc';
-import { BMDModelInstance } from './render';
-import { GfxDevice } from '../gfx/platform/GfxPlatform';
-import { BTK } from './j3d';
-import { SceneContext } from '../SceneBase';
+import * as RARC from '../Common/JSYSTEM/JKRArchive.js';
+import { J3DModelInstanceSimple } from '../Common/JSYSTEM/J3D/J3DGraphSimple.js';
+import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
+import { BTK } from '../Common/JSYSTEM/J3D/J3DLoader.js';
+import { SceneContext } from '../SceneBase.js';
 
-const id = "pik2";
-const name = "Pikmin 2";
+const pathBase = `Pikmin2`;
 
 class Pik2SceneDesc implements Viewer.SceneDesc {
     public id: string;
@@ -22,7 +21,7 @@ class Pik2SceneDesc implements Viewer.SceneDesc {
         this.id = this.path;
     }
 
-    private spawnBMD(device: GfxDevice, renderer: BasicRenderer, rarc: RARC.RARC, basename: string, modelMatrix: mat4 | null = null): BMDModelInstance {
+    private spawnBMD(device: GfxDevice, renderer: BasicRenderer, rarc: RARC.JKRArchive, basename: string, modelMatrix: mat4 | null = null): J3DModelInstanceSimple {
         const bmdFile = assertExists(rarc.findFile(`${basename}.bmd`));
         const btkFile = rarc.findFile(`${basename}.btk`);
         const brkFile = rarc.findFile(`${basename}.brk`);
@@ -36,8 +35,8 @@ class Pik2SceneDesc implements Viewer.SceneDesc {
 
     public createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
         const dataFetcher = context.dataFetcher;
-        const path = `j3d/pik2/${this.path}`;
-        return dataFetcher.fetchData(path).then((result: ArrayBufferSlice) => {
+        const path = `${pathBase}/${this.path}`;
+        return dataFetcher.fetchData(path).then((result) => {
             return Yaz0.decompress(result);
         }).then((buffer: ArrayBufferSlice) => {
             const rarc = RARC.parse(buffer);
@@ -49,7 +48,7 @@ class Pik2SceneDesc implements Viewer.SceneDesc {
                 const m = this.spawnBMD(device, renderer, rarc, `model`);
                 const btk = rarc.findFileData(`texanm_1.btk`);
                 if (btk !== null)
-                    m.bindTTK1(BTK.parse(btk).ttk1);
+                    m.bindTTK1(BTK.parse(btk));
                 renderer.addModelInstance(m);
             }
 
@@ -60,6 +59,9 @@ class Pik2SceneDesc implements Viewer.SceneDesc {
         });
     }
 }
+
+const id = "pik2";
+const name = "Pikmin 2";
 
 const sceneDescs = [
     "Areas",

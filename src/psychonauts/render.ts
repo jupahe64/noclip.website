@@ -1,22 +1,28 @@
 
-import { TextureHolder, LoadedTexture, TextureMapping } from "../TextureHolder";
-import { PPAK_Texture, TextureFormat, getTextureFormatName } from "./ppf";
-import { GfxDevice, GfxFormat, GfxBufferUsage, GfxBuffer, GfxVertexAttributeDescriptor, GfxVertexAttributeFrequency, GfxInputLayout, GfxInputState, GfxVertexBufferDescriptor, GfxBufferFrequencyHint, GfxBindingLayoutDescriptor, GfxProgram, GfxHostAccessPass, GfxSampler, GfxTexFilterMode, GfxMipFilterMode, GfxWrapMode, GfxTextureDimension } from "../gfx/platform/GfxPlatform";
-import * as Viewer from "../viewer";
-import { decompressBC, DecodedSurfaceSW, surfaceToCanvas } from "../fres/bc_texture";
-import { EMeshFrag, EMesh, EScene, EDomain } from "./plb";
-import { makeStaticDataBuffer, makeStaticDataBufferFromSlice } from "../gfx/helpers/BufferHelpers";
-import { DeviceProgram, DeviceProgramReflection } from "../Program";
-import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer } from "../gfx/helpers/TopologyHelpers";
-import { GfxRenderInstBuilder, GfxRenderInst, GfxRenderInstViewRenderer } from "../gfx/render/GfxRenderer";
-import { GfxRenderBuffer } from "../gfx/render/GfxRenderBuffer";
-import { fillMatrix4x3, fillMatrix4x4 } from "../gfx/helpers/UniformBufferHelpers";
-import { mat4 } from "gl-matrix";
-import { computeViewMatrix, Camera } from "../Camera";
-import { BasicRendererHelper } from "../oot3d/render";
-import ArrayBufferSlice from "../ArrayBufferSlice";
+import { TextureHolder, TextureMapping } from "../TextureHolder.js";
+import { PPAK_Texture, TextureFormat, getTextureFormatName } from "./ppf.js";
+import { GfxDevice, GfxFormat, GfxBufferUsage, GfxBuffer, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxInputLayout, GfxVertexBufferDescriptor, GfxBufferFrequencyHint, GfxBindingLayoutDescriptor, GfxProgram, GfxSampler, GfxTexFilterMode, GfxMipFilterMode, GfxWrapMode, GfxTextureDimension, GfxRenderPass, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxMegaStateDescriptor, GfxBlendMode, GfxBlendFactor, GfxCullMode, GfxFrontFaceMode } from "../gfx/platform/GfxPlatform.js";
+import * as Viewer from "../viewer.js";
+import { decompressBC, DecodedSurfaceSW, surfaceToCanvas } from "../Common/bc_texture.js";
+import { EMeshFrag, EMesh, EScene, EDomain, MaterialFlags } from "./plb.js";
+import { DeviceProgram } from "../Program.js";
+import { convertToTriangleIndexBuffer, filterDegenerateTriangleIndexBuffer } from "../gfx/helpers/TopologyHelpers.js";
+import { fillMatrix4x3, fillMatrix4x4, fillVec4, fillVec4v } from "../gfx/helpers/UniformBufferHelpers.js";
+import { mat4, ReadonlyMat4 } from "gl-matrix";
+import { Camera, computeViewSpaceDepthFromWorldSpaceAABB } from "../Camera.js";
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { GfxRenderHelper } from "../gfx/render/GfxRenderHelper.js";
+import { nArray, assertExists } from "../util.js";
+import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderGraphHelpers.js";
+import { GfxRendererLayer, GfxRenderInstList, GfxRenderInstManager, makeSortKey, setSortKeyDepth } from "../gfx/render/GfxRenderInstManager.js";
+import { GfxrAttachmentSlot } from '../gfx/render/GfxRenderGraph.js';
+import { AABB } from '../Geometry.js';
+import { setAttachmentStateSimple } from '../gfx/helpers/GfxMegaStateDescriptorHelpers.js';
+import { GfxRenderCache } from "../gfx/render/GfxRenderCache.js";
+import { GfxShaderLibrary } from "../gfx/helpers/GfxShaderLibrary.js";
+import { createBufferFromData, createBufferFromSlice } from "../gfx/helpers/BufferHelpers.js";
 
-function decodeTextureData(format: TextureFormat, width: number, height: number, pixels: Uint8Array): DecodedSurfaceSW {
+function decodeTextureData(format: TextureFormat, width: number, height: number, pixels: Uint8Array<ArrayBuffer>): DecodedSurfaceSW {
     switch (format) {
     case TextureFormat.B8G8R8A8:
         return { type: 'RGBA', flag: 'SRGB', width, height, depth: 1, pixels };
@@ -33,16 +39,16 @@ function decodeTextureData(format: TextureFormat, width: number, height: number,
     }
 }
 
-export class PsychonautsTextureHolder extends TextureHolder<PPAK_Texture> {
+export class PsychonautsTextureHolder extends TextureHolder {
     private ppakTextures: PPAK_Texture[] = [];
 
     public findPPAKTexture(name: string): PPAK_Texture {
-        return this.ppakTextures.find((t) => t.name === name);
+        return assertExists(this.ppakTextures.find((t) => t.name === name));
     }
 
-    public loadTexture(device: GfxDevice, texture: PPAK_Texture): LoadedTexture | null {
+    public addTexture(device: GfxDevice, texture: PPAK_Texture): void {
         if (texture.mipData.length === 0)
-            return null;
+            return;
 
         const levelDatas: Uint8Array[] = [];
         const surfaces: HTMLCanvasElement[] = [];
@@ -54,46 +60,105 @@ export class PsychonautsTextureHolder extends TextureHolder<PPAK_Texture> {
             levelDatas.push(decodedSurface.pixels as Uint8Array);
 
             const canvas = document.createElement('canvas');
-            surfaceToCanvas(canvas, decodedSurface, 0);
+            surfaceToCanvas(canvas, decodedSurface);
             surfaces.push(canvas);
 
             if (mipWidth > 1) mipWidth >>>= 1;
             if (mipHeight > 1) mipHeight >>>= 1;
         }
 
-        const gfxTexture = device.createTexture({
-            dimension: GfxTextureDimension.n2D, pixelFormat: GfxFormat.U8_RGBA,
-            width: texture.width, height: texture.height, depth: 1, numLevels: texture.mipData.length,
-        });
-        const hostAccessPass = device.createHostAccessPass();
-        hostAccessPass.uploadTextureData(gfxTexture, 0, levelDatas);
-        device.submitPass(hostAccessPass);
+        const gfxTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.U8_RGBA_NORM, texture.width, texture.height, texture.mipData.length));
+        device.uploadTextureData(gfxTexture, 0, levelDatas);
 
         const extraInfo = new Map<string, string>();
         extraInfo.set('Format', getTextureFormatName(texture.format));
-        const displayName = texture.name.split('/').pop();
+        const displayName = texture.name.split('/').pop()!;
         const viewerTexture: Viewer.Texture = { name: displayName, surfaces, extraInfo };
+        device.setResourceName(gfxTexture, displayName);
 
         this.ppakTextures.push(texture);
 
-        return { gfxTexture, viewerTexture };
+        this.gfxTextures.push(gfxTexture);
+        this.viewerTextures.push(viewerTexture);
+        this.textureNames.push(texture.name);
     }
 }
-
-// @ts-ignore
-import { readFileSync } from 'fs';
 
 class PsychonautsProgram extends DeviceProgram {
     public static a_Position = 0;
     public static a_Color = 1;
-    public static a_TexCoord = 2;
+    public static a_TexCoord0 = 2;
+    public static a_TexCoord1 = 3;
 
     public static ub_SceneParams = 0;
     public static ub_MeshFragParams = 1;
 
-    private static program = readFileSync('src/psychonauts/program.glsl', { encoding: 'utf8' });
-    public static programReflection: DeviceProgramReflection = DeviceProgram.parseReflectionDefinitions(PsychonautsProgram.program);
-    public both = PsychonautsProgram.program;
+    public override both = `
+precision highp float;
+
+${GfxShaderLibrary.MatrixLibrary}
+
+// Expected to be constant across the entire scene.
+layout(std140) uniform ub_SceneParams {
+    Mat4x4 u_Projection;
+};
+
+layout(std140) uniform ub_MeshFragParams {
+    Mat3x4 u_BoneMatrix[1];
+    vec4 u_MaterialColor;
+    vec4 u_TexCoordOffs;
+};
+
+uniform sampler2D u_Texture;
+uniform sampler2D u_TextureDetail;
+uniform sampler2D u_TextureLightmap;
+
+varying vec4 v_Color;
+varying vec4 v_TexCoord;
+
+#ifdef VERT
+layout(location = ${PsychonautsProgram.a_Position}) in vec3 a_Position;
+layout(location = ${PsychonautsProgram.a_Color}) in vec4 a_Color;
+layout(location = ${PsychonautsProgram.a_TexCoord0}) in vec2 a_TexCoord0;
+layout(location = ${PsychonautsProgram.a_TexCoord1}) in vec2 a_TexCoord1;
+
+void main() {
+    vec3 t_PositionView = UnpackMatrix(u_BoneMatrix[0]) * vec4(a_Position, 1.0);
+    gl_Position = UnpackMatrix(u_Projection) * vec4(t_PositionView, 1.0);
+    v_Color = a_Color;
+    v_TexCoord.xy = a_TexCoord0 + u_TexCoordOffs.xy;
+    v_TexCoord.zw = a_TexCoord1;
+}
+#endif
+
+#ifdef FRAG
+void main() {
+    vec4 t_Color = vec4(1.0);
+
+#ifdef USE_TEXTURE
+    t_Color *= texture(SAMPLER_2D(u_Texture), v_TexCoord.xy);
+#endif
+
+#ifdef USE_LIGHTMAP
+    t_Color.rgb *= texture(SAMPLER_2D(u_TextureLightmap), v_TexCoord.zw).rgb;
+#endif
+
+#ifdef USE_VERTEX_COLOR
+    // TODO(jstpierre): How is the vertex color buffer used?
+    t_Color.rgb *= clamp(v_Color.rgb * 4.0, 0.0, 1.0);
+    t_Color.a *= v_Color.a;
+#endif
+
+#ifdef USE_ALPHA_TEST
+    // TODO(jstpierre): Configurable alpha ref?
+    if (t_Color.a < 0.5)
+        discard;
+#endif
+
+    gl_FragColor = t_Color;
+}
+#endif
+`;
 }
 
 function decodeStreamUV(buffer: ArrayBufferSlice, iVertCount: number, streamUVCount: number, uvCoordScale: number): Float32Array {
@@ -115,18 +180,26 @@ class MeshFragData {
     private posNrmBuffer: GfxBuffer;
     private colorBuffer: GfxBuffer | null;
     private uvBuffer: GfxBuffer | null;
+    private zeroBuffer: GfxBuffer | null = null;
     private idxBuffer: GfxBuffer;
-    private inputLayout: GfxInputLayout;
-    public inputState: GfxInputState;
+    public inputLayout: GfxInputLayout;
+    public vertexBufferDescriptors: (GfxVertexBufferDescriptor | null)[];
+    public indexBufferDescriptor: GfxIndexBufferDescriptor;
     public indexCount: number;
 
-    constructor(device: GfxDevice, public meshFrag: EMeshFrag) {
-        this.posNrmBuffer = makeStaticDataBufferFromSlice(device, GfxBufferUsage.VERTEX, meshFrag.streamPosNrm);
-        this.colorBuffer = meshFrag.streamColor ? makeStaticDataBufferFromSlice(device, GfxBufferUsage.VERTEX, meshFrag.streamColor) : null;
+    constructor(cache: GfxRenderCache, public meshFrag: EMeshFrag) {
+        const device = cache.device;
+
+        this.posNrmBuffer = createBufferFromSlice(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, meshFrag.streamPosNrm);
+
+        if (meshFrag.streamColor === null || meshFrag.streamUV === null)
+            this.zeroBuffer = device.createBuffer(32, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static);
+
+        this.colorBuffer = meshFrag.streamColor ? createBufferFromSlice(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, meshFrag.streamColor) : null;
 
         if (meshFrag.streamUVCount > 0) {
-            const uvData = decodeStreamUV(meshFrag.streamUV, meshFrag.iVertCount, meshFrag.streamUVCount, meshFrag.uvCoordScale);
-            this.uvBuffer = makeStaticDataBuffer(device, GfxBufferUsage.VERTEX, uvData.buffer);
+            const uvData = decodeStreamUV(meshFrag.streamUV!, meshFrag.iVertCount, meshFrag.streamUVCount, meshFrag.uvCoordScale);
+            this.uvBuffer = createBufferFromData(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, uvData.buffer);
         } else {
             this.uvBuffer = null;
         }
@@ -134,26 +207,32 @@ class MeshFragData {
         const numIndexes = meshFrag.streamIdx.byteLength / 2;
         const triIdxData = convertToTriangleIndexBuffer(meshFrag.topology, meshFrag.streamIdx.createTypedArray(Uint16Array, 0, numIndexes));
         const idxData = filterDegenerateTriangleIndexBuffer(triIdxData);
-        this.idxBuffer = makeStaticDataBuffer(device, GfxBufferUsage.INDEX, idxData.buffer);
+        this.idxBuffer = createBufferFromData(device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, idxData.buffer);
         this.indexCount = idxData.length;
 
         const vertexAttributeDescriptors: GfxVertexAttributeDescriptor[] = [
-            { location: PsychonautsProgram.a_Position, bufferIndex: 0, bufferByteOffset: 0, format: GfxFormat.F32_RGB, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: PsychonautsProgram.a_Color, bufferIndex: 1, bufferByteOffset: 0, format: GfxFormat.U8_RGBA_NORM, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
-            { location: PsychonautsProgram.a_TexCoord, bufferIndex: 2, bufferByteOffset: 0, format: GfxFormat.F32_RG, frequency: GfxVertexAttributeFrequency.PER_VERTEX },
+            { location: PsychonautsProgram.a_Position, bufferIndex: 0, bufferByteOffset: 0, format: GfxFormat.F32_RGB },
+            { location: PsychonautsProgram.a_Color, bufferIndex: 1, bufferByteOffset: 0, format: GfxFormat.U8_RGBA_NORM },
+            { location: PsychonautsProgram.a_TexCoord0, bufferIndex: 2, bufferByteOffset: 0x00, format: GfxFormat.F32_RG },
+            { location: PsychonautsProgram.a_TexCoord1, bufferIndex: 2, bufferByteOffset: 0x08 * (meshFrag.streamUVCount - 1), format: GfxFormat.F32_RG },
+        ];
+        const vertexBufferDescriptors: GfxInputLayoutBufferDescriptor[] = [
+            { byteStride: 0x10, frequency: GfxVertexBufferFrequency.PerVertex, },
+            this.colorBuffer ? { byteStride: 0x04, frequency: GfxVertexBufferFrequency.PerVertex } : { byteStride: 0, frequency: GfxVertexBufferFrequency.Constant },
+            this.uvBuffer    ? { byteStride: 0x08 * meshFrag.streamUVCount, frequency: GfxVertexBufferFrequency.PerVertex } : { byteStride: 0, frequency: GfxVertexBufferFrequency.Constant },
         ];
 
-        this.inputLayout = device.createInputLayout({
+        this.inputLayout = cache.createInputLayout({
             vertexAttributeDescriptors,
+            vertexBufferDescriptors,
             indexBufferFormat: GfxFormat.U16_R,
         });
-        const buffers: GfxVertexBufferDescriptor[] = [
-            { buffer: this.posNrmBuffer, byteStride: 0x10, byteOffset: 0 },
-            this.colorBuffer ? { buffer: this.colorBuffer, byteStride: 0x04, byteOffset: 0 } : null,
-            this.uvBuffer    ? { buffer: this.uvBuffer, byteStride: 0x08 * meshFrag.streamUVCount, byteOffset: 0 } : null,
+        this.vertexBufferDescriptors = [
+            { buffer: this.posNrmBuffer },
+            { buffer: this.colorBuffer !== null ? this.colorBuffer : this.zeroBuffer! },
+            { buffer: this.uvBuffer !== null ? this.uvBuffer : this.zeroBuffer! },
         ];
-        const idxBuffer: GfxVertexBufferDescriptor = { buffer: this.idxBuffer, byteStride: 0, byteOffset: 0 };
-        this.inputState = device.createInputState(this.inputLayout, buffers, idxBuffer);
+        this.indexBufferDescriptor = { buffer: this.idxBuffer };
     }
 
     public destroy(device: GfxDevice): void {
@@ -162,9 +241,9 @@ class MeshFragData {
             device.destroyBuffer(this.colorBuffer);
         if (this.uvBuffer !== null)
             device.destroyBuffer(this.uvBuffer);
+        if (this.zeroBuffer !== null)
+            device.destroyBuffer(this.zeroBuffer);
         device.destroyBuffer(this.idxBuffer);
-        device.destroyInputLayout(this.inputLayout);
-        device.destroyInputState(this.inputState);
     }
 }
 
@@ -172,11 +251,11 @@ class MeshData {
     public meshFragData: MeshFragData[] = [];
     public submeshData: MeshData[] = [];
 
-    constructor(device: GfxDevice, public mesh: EMesh) {
+    constructor(cache: GfxRenderCache, public mesh: EMesh) {
         for (let i = 0; i < this.mesh.meshFrag.length; i++)
-            this.meshFragData[i] = new MeshFragData(device, this.mesh.meshFrag[i]);
+            this.meshFragData[i] = new MeshFragData(cache, this.mesh.meshFrag[i]);
         for (let i = 0; i < this.mesh.submesh.length; i++)
-            this.submeshData[i] = new MeshData(device, this.mesh.submesh[i]);
+            this.submeshData[i] = new MeshData(cache, this.mesh.submesh[i]);
     }
 
     public destroy(device: GfxDevice): void {
@@ -191,11 +270,11 @@ class DomainData {
     public meshData: MeshData[] = [];
     public subdomainData: DomainData[] = [];
 
-    constructor(device: GfxDevice, public domain: EDomain) {
+    constructor(cache: GfxRenderCache, public domain: EDomain) {
         for (let i = 0; i < domain.meshes.length; i++)
-            this.meshData[i] = new MeshData(device, domain.meshes[i]);
+            this.meshData[i] = new MeshData(cache, domain.meshes[i]);
         for (let i = 0; i < domain.subdomains.length; i++)
-            this.subdomainData[i] = new DomainData(device, domain.subdomains[i]);
+            this.subdomainData[i] = new DomainData(cache, domain.subdomains[i]);
     }
 
     public destroy(device: GfxDevice): void {
@@ -207,76 +286,124 @@ class DomainData {
 }
 
 const scratchMat4 = mat4.create();
+const scratchAABB = new AABB();
 class MeshFragInstance {
-    public renderInst: GfxRenderInst;
-    private gfxSamplers: GfxSampler[] = [];
+    private gfxProgram: GfxProgram | null = null;
+    private program: PsychonautsProgram;
+    private textureMapping = nArray(3, () => new TextureMapping());
+    private megaState: Partial<GfxMegaStateDescriptor> = {};
+    private sortKey: number = 0;
+    private visible = true;
 
-    constructor(device: GfxDevice, renderInstBuilder: GfxRenderInstBuilder, scene: EScene, textureHolder: PsychonautsTextureHolder, public meshFragData: MeshFragData) {
-        this.renderInst = renderInstBuilder.pushRenderInst();
-        this.renderInst.inputState = this.meshFragData.inputState;
-        // TODO(jstpierre): Which render flags to use?
-        renderInstBuilder.newUniformBufferInstance(this.renderInst, PsychonautsProgram.ub_MeshFragParams);
-        this.renderInst.drawIndexes(this.meshFragData.indexCount, 0);
+    constructor(cache: GfxRenderCache, scene: EScene, textureHolder: PsychonautsTextureHolder, public meshFragData: MeshFragData) {
+        this.program = new PsychonautsProgram();
 
-        const textureMapping = new TextureMapping();
+        const meshFrag = this.meshFragData.meshFrag;
 
-        const program = new PsychonautsProgram();
+        const gfxSampler = cache.createSampler({
+            magFilter: GfxTexFilterMode.Bilinear,
+            minFilter: GfxTexFilterMode.Bilinear,
+            mipFilter: GfxMipFilterMode.Linear,
+            wrapS: GfxWrapMode.Repeat,
+            wrapT: GfxWrapMode.Repeat,
+        });
 
-        if (meshFragData.meshFrag.textureIds.length >= 1) {
-            program.defines.set('USE_TEXTURE', '1');
-
-            const textureId = meshFragData.meshFrag.textureIds[0];
+        const fillTextureReference = (dst: TextureMapping, textureId: number) => {
             const textureReference = scene.textureReferences[textureId];
 
-            if (textureHolder.hasTexture(textureReference.textureName)) {
-                textureHolder.fillTextureMapping(textureMapping, textureReference.textureName);
-            } else {
-                textureMapping.gfxTexture = null;
-            }
+            if (!textureHolder.fillTextureMapping(dst, textureReference.textureName))
+                dst.gfxTexture = null;
 
-            const gfxSampler = device.createSampler({
-                magFilter: GfxTexFilterMode.BILINEAR,
-                minFilter: GfxTexFilterMode.BILINEAR,
-                mipFilter: GfxMipFilterMode.LINEAR,
-                minLOD: 0,
-                maxLOD: 1000,
-                wrapS: GfxWrapMode.REPEAT,
-                wrapT: GfxWrapMode.REPEAT,
+            dst.gfxSampler = gfxSampler;
+        };
+
+        if (meshFrag.textureIds.length >= 1) {
+            this.program.setDefineBool('USE_TEXTURE', true);
+            fillTextureReference(this.textureMapping[0], meshFrag.textureIds[0]);
+        }
+
+        if (meshFrag.textureLightmap !== null) {
+            this.program.setDefineBool('USE_LIGHTMAP', true);
+            fillTextureReference(this.textureMapping[2], meshFrag.textureLightmap);
+        }
+
+        let useAlphaTest: boolean;
+        if (!!(meshFrag.materialFlags & MaterialFlags.AdditiveBlended)) {
+            this.sortKey = makeSortKey(GfxRendererLayer.TRANSLUCENT);
+            setAttachmentStateSimple(this.megaState, {
+                blendMode: GfxBlendMode.Add,
+                blendSrcFactor: GfxBlendFactor.One,
+                blendDstFactor: GfxBlendFactor.One,
             });
-            this.gfxSamplers.push(gfxSampler);
-
-            textureMapping.gfxSampler = gfxSampler;
+            useAlphaTest = false;
+        } else if (!!(meshFrag.materialFlags & MaterialFlags.Alpha)) {
+            this.sortKey = makeSortKey(GfxRendererLayer.TRANSLUCENT);
+            setAttachmentStateSimple(this.megaState, {
+                blendMode: GfxBlendMode.Add,
+                blendSrcFactor: GfxBlendFactor.SrcAlpha,
+                blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
+            });
+            useAlphaTest = false;
+        } else {
+            this.sortKey = makeSortKey(GfxRendererLayer.OPAQUE);
+            useAlphaTest = true;
         }
 
-        if (this.meshFragData.meshFrag.streamColor !== null) {
-            program.defines.set('USE_VERTEX_COLOR', '1');
-        }
+        if (!!(meshFrag.materialFlags & MaterialFlags.Decal))
+            this.megaState.polygonOffset = true;
 
-        this.renderInst.setDeviceProgram(program);
+        this.megaState.frontFace = GfxFrontFaceMode.CW;
+        if (!!(meshFrag.materialFlags & MaterialFlags.DoubleSided))
+            this.megaState.cullMode = GfxCullMode.None;
+        else
+            this.megaState.cullMode = GfxCullMode.Back;
 
-        this.renderInst.setSamplerBindingsFromTextureMappings([textureMapping]);
+        if (meshFrag.streamColor !== null)
+            this.program.setDefineBool('USE_VERTEX_COLOR', true);
+
+        // TODO(jstpierre): Some way of determining whether to use alpha test?
+        this.program.setDefineBool('USE_ALPHA_TEST', useAlphaTest);
     }
 
-    private computeModelMatrix(camera: Camera, modelMatrix: mat4): mat4 {
-        computeViewMatrix(scratchMat4, camera);
-        mat4.mul(scratchMat4, scratchMat4, modelMatrix);
-        return scratchMat4;
-    }
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, modelMatrix: ReadonlyMat4, viewerInput: Viewer.ViewerRenderInput) {
+        if (!this.visible)
+            return;
 
-    public prepareToRender(meshFragParamsBuffer: GfxRenderBuffer, modelMatrix: mat4, visible: boolean, viewRenderer: Viewer.ViewerRenderInput) {
-        this.renderInst.visible = visible;
+        const meshFrag = this.meshFragData.meshFrag;
 
-        if (this.renderInst.visible) {
-            let offs = this.renderInst.getUniformBufferOffset(PsychonautsProgram.ub_MeshFragParams);
-            const mapped = meshFragParamsBuffer.mapBufferF32(offs, 12);
-            fillMatrix4x3(mapped, offs, this.computeModelMatrix(viewRenderer.camera, modelMatrix));
-        }
+        const renderInst = renderInstManager.newRenderInst();
+        renderInst.setVertexInput(this.meshFragData.inputLayout, this.meshFragData.vertexBufferDescriptors, this.meshFragData.indexBufferDescriptor);
+        renderInst.setDrawCount(this.meshFragData.indexCount);
+
+        if (this.gfxProgram === null)
+            this.gfxProgram = renderInstManager.gfxRenderCache.createProgram(this.program);
+
+        renderInst.setGfxProgram(this.gfxProgram);
+        renderInst.setSamplerBindingsFromTextureMappings(this.textureMapping);
+        renderInst.setMegaStateFlags(this.megaState);
+
+        renderInst.sortKey = this.sortKey;
+        scratchAABB.transform(meshFrag.bbox, modelMatrix);
+        const depth = computeViewSpaceDepthFromWorldSpaceAABB(viewerInput.camera.viewMatrix, scratchAABB);
+        renderInst.sortKey = setSortKeyDepth(renderInst.sortKey, depth);
+
+        let offs = renderInst.allocateUniformBuffer(PsychonautsProgram.ub_MeshFragParams, 20);
+        const d = renderInst.mapUniformBufferF32(PsychonautsProgram.ub_MeshFragParams);
+        mat4.mul(scratchMat4, viewerInput.camera.viewMatrix, modelMatrix);
+        offs += fillMatrix4x3(d, offs, scratchMat4);
+
+        offs += fillVec4v(d, offs, meshFrag.materialColor);
+        
+        const time = viewerInput.time / 4000;
+        const texCoordTransVel = meshFrag.texCoordTransVel;
+        const texCoordTransX = texCoordTransVel[0] * time;
+        const texCoordTransY = texCoordTransVel[1] * time;
+        offs += fillVec4(d, offs, texCoordTransX, texCoordTransY);
+
+        renderInstManager.submitRenderInst(renderInst);
     }
 
     public destroy(device: GfxDevice): void {
-        device.destroyProgram(this.renderInst.gfxProgram);
-        for (let i = 0; i < this.gfxSamplers.length; i++)
-            device.destroySampler(this.gfxSamplers[i]);
     }
 }
 
@@ -284,21 +411,25 @@ class MeshInstance {
     private meshFragInstance: MeshFragInstance[] = [];
     private submeshInstance: MeshInstance[] = [];
     public modelMatrix = mat4.create();
+    private visible = true;
 
-    constructor(device: GfxDevice, renderInstBuilder: GfxRenderInstBuilder, scene: EScene, textureHolder: PsychonautsTextureHolder, public meshData: MeshData) {
+    constructor(cache: GfxRenderCache, scene: EScene, textureHolder: PsychonautsTextureHolder, public meshData: MeshData) {
         for (let i = 0; i < this.meshData.meshFragData.length; i++)
-            this.meshFragInstance[i] = new MeshFragInstance(device, renderInstBuilder, scene, textureHolder, this.meshData.meshFragData[i])
+            this.meshFragInstance[i] = new MeshFragInstance(cache, scene, textureHolder, this.meshData.meshFragData[i])
         for (let i = 0; i < this.meshData.submeshData.length; i++)
-            this.submeshInstance[i] = new MeshInstance(device, renderInstBuilder, scene, textureHolder, this.meshData.submeshData[i]);
+            this.submeshInstance[i] = new MeshInstance(cache, scene, textureHolder, this.meshData.submeshData[i]);
     }
 
-    public prepareToRender(meshFragParamsBuffer: GfxRenderBuffer, visible: boolean, viewerInput: Viewer.ViewerRenderInput): void {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible)
+            return;
+
         for (let i = 0; i < this.meshFragInstance.length; i++)
-            this.meshFragInstance[i].prepareToRender(meshFragParamsBuffer, this.modelMatrix, visible, viewerInput);
+            this.meshFragInstance[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput);
         for (let i = 0; i < this.submeshInstance.length; i++)
-            this.submeshInstance[i].prepareToRender(meshFragParamsBuffer, visible, viewerInput);
+            this.submeshInstance[i].prepareToRender(device, renderInstManager, viewerInput);
     }
-    
+
     public destroy(device: GfxDevice): void {
         for (let i = 0; i < this.meshFragInstance.length; i++)
             this.meshFragInstance[i].destroy(device);
@@ -310,19 +441,23 @@ class MeshInstance {
 class DomainInstance {
     public meshInstance: MeshInstance[] = [];
     public subdomainInstance: DomainInstance[] = [];
+    private visible = true;
 
-    constructor(device: GfxDevice, renderInstBuilder: GfxRenderInstBuilder, scene: EScene, textureHolder: PsychonautsTextureHolder, public domainData: DomainData) {
+    constructor(cache: GfxRenderCache, scene: EScene, textureHolder: PsychonautsTextureHolder, public domainData: DomainData) {
         for (let i = 0; i < this.domainData.meshData.length; i++)
-            this.meshInstance[i] = new MeshInstance(device, renderInstBuilder, scene, textureHolder, this.domainData.meshData[i]);
+            this.meshInstance[i] = new MeshInstance(cache, scene, textureHolder, this.domainData.meshData[i]);
         for (let i = 0; i < this.domainData.subdomainData.length; i++)
-            this.subdomainInstance[i] = new DomainInstance(device, renderInstBuilder, scene, textureHolder, this.domainData.subdomainData[i]);
+            this.subdomainInstance[i] = new DomainInstance(cache, scene, textureHolder, this.domainData.subdomainData[i]);
     }
 
-    public prepareToRender(meshFragParamsBuffer: GfxRenderBuffer, visible: boolean, viewerInput: Viewer.ViewerRenderInput): void {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible)
+            return;
+
         for (let i = 0; i < this.meshInstance.length; i++)
-            this.meshInstance[i].prepareToRender(meshFragParamsBuffer, visible, viewerInput);
+            this.meshInstance[i].prepareToRender(device, renderInstManager, viewerInput);
         for (let i = 0; i < this.subdomainInstance.length; i++)
-            this.subdomainInstance[i].prepareToRender(meshFragParamsBuffer, visible, viewerInput);
+            this.subdomainInstance[i].prepareToRender(device, renderInstManager, viewerInput);
     }
 
     public destroy(device: GfxDevice): void {
@@ -337,73 +472,92 @@ function fillSceneParamsData(d: Float32Array, camera: Camera, offs: number = 0):
     offs += fillMatrix4x4(d, offs, camera.projectionMatrix);
 }
 
+const bindingLayouts: GfxBindingLayoutDescriptor[] = [
+    { numUniformBuffers: 2, numSamplers: 3 },
+];
 export class SceneRenderer {
-    private sceneParamsBuffer: GfxRenderBuffer;
-    private meshFragParamsBuffer: GfxRenderBuffer;
-    private renderInstBuilder: GfxRenderInstBuilder;
-    private templateRenderInst: GfxRenderInst;
     private domainData: DomainData;
     private domainInstance: DomainInstance;
 
-    constructor(device: GfxDevice, textureHolder: PsychonautsTextureHolder, public scene: EScene) {
-        this.sceneParamsBuffer = new GfxRenderBuffer(GfxBufferUsage.UNIFORM, GfxBufferFrequencyHint.DYNAMIC, `ub_SceneParams`);
-        this.meshFragParamsBuffer = new GfxRenderBuffer(GfxBufferUsage.UNIFORM, GfxBufferFrequencyHint.DYNAMIC, `ub_MeshFragParams`);
-
-        const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-            { numUniformBuffers: 1, numSamplers: 0 }, // Scene
-            { numUniformBuffers: 1, numSamplers: 1 }, // Shape
-        ];
-        const uniformBuffers = [ this.sceneParamsBuffer, this.meshFragParamsBuffer ];
-
-        this.renderInstBuilder = new GfxRenderInstBuilder(device, PsychonautsProgram.programReflection, bindingLayouts, uniformBuffers);
-
-        this.templateRenderInst = this.renderInstBuilder.pushTemplateRenderInst();
-        this.renderInstBuilder.newUniformBufferInstance(this.templateRenderInst, PsychonautsProgram.ub_SceneParams);
-
-        this.domainData = new DomainData(device, this.scene.domain);
-        this.domainInstance = new DomainInstance(device, this.renderInstBuilder, scene, textureHolder, this.domainData);
+    constructor(cache: GfxRenderCache, textureHolder: PsychonautsTextureHolder, public scene: EScene) {
+        this.domainData = new DomainData(cache, this.scene.domain);
+        this.domainInstance = new DomainInstance(cache, scene, textureHolder, this.domainData);
     }
 
-    public addToViewRenderer(device: GfxDevice, viewRenderer: GfxRenderInstViewRenderer): void {
-        this.renderInstBuilder.popTemplateRenderInst();
-        this.renderInstBuilder.finish(device, viewRenderer);
-    }
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+        const template = renderInstManager.pushTemplate();
+        template.setBindingLayouts(bindingLayouts);
 
-    public prepareToRender(hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
-        let offs = this.templateRenderInst.getUniformBufferOffset(PsychonautsProgram.ub_SceneParams);
-        const sceneParamsMapped = this.sceneParamsBuffer.mapBufferF32(offs, 16);
+        let offs = template.allocateUniformBuffer(PsychonautsProgram.ub_SceneParams, 16);
+        const sceneParamsMapped = template.mapUniformBufferF32(PsychonautsProgram.ub_SceneParams);
         fillSceneParamsData(sceneParamsMapped, viewerInput.camera, offs);
 
-        this.domainInstance.prepareToRender(this.meshFragParamsBuffer, true, viewerInput);
-
-        this.sceneParamsBuffer.prepareToRender(hostAccessPass);
-        this.meshFragParamsBuffer.prepareToRender(hostAccessPass);
+        this.domainInstance.prepareToRender(device, renderInstManager, viewerInput);
+        renderInstManager.popTemplate();
     }
 
     public destroy(device: GfxDevice): void {
-        this.sceneParamsBuffer.destroy(device);
-        this.meshFragParamsBuffer.destroy(device);
         this.domainInstance.destroy(device);
         this.domainData.destroy(device);
     }
 }
 
-export class PsychonautsRenderer extends BasicRendererHelper implements Viewer.SceneGfx {
-    public textureHolder = new PsychonautsTextureHolder();
-    private sceneRenderers: SceneRenderer[] = [];
+export class PsychonautsRenderer {
+    public clearRenderPassDescriptor = standardFullClearRenderPassDescriptor;
 
-    public addSceneRenderer(device: GfxDevice, sceneRenderer: SceneRenderer): void {
-        this.sceneRenderers.push(sceneRenderer);
-        sceneRenderer.addToViewRenderer(device, this.viewRenderer);
+    public textureHolder = new PsychonautsTextureHolder();
+    public sceneRenderers: SceneRenderer[] = [];
+
+    private renderHelper: GfxRenderHelper;
+    private renderInstListMain = new GfxRenderInstList();
+
+    public cache: GfxRenderCache;
+
+    constructor(device: GfxDevice) {
+        this.renderHelper = new GfxRenderHelper(device);
+        this.cache = this.renderHelper.renderCache;
     }
 
-    public prepareToRender(hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    public addSceneRenderer(sceneRenderer: SceneRenderer): void {
+        this.sceneRenderers.push(sceneRenderer);
+    }
+
+    public prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
+        this.renderHelper.pushTemplateRenderInst();
+        this.renderHelper.renderInstManager.setCurrentList(this.renderInstListMain);
         for (let i = 0; i < this.sceneRenderers.length; i++)
-            this.sceneRenderers[i].prepareToRender(hostAccessPass, viewerInput);
+            this.sceneRenderers[i].prepareToRender(device, this.renderHelper.renderInstManager, viewerInput);
+        this.renderHelper.renderInstManager.popTemplate();
+        this.renderHelper.prepareToRender();
+    }
+
+    public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput) {
+        const renderInstManager = this.renderHelper.renderInstManager;
+        const builder = this.renderHelper.renderGraph.newGraphBuilder();
+
+        const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, this.clearRenderPassDescriptor);
+        const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, this.clearRenderPassDescriptor);
+
+        const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
+        const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
+        builder.pushPass((pass) => {
+            pass.setDebugName('Main');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
+            pass.exec((passRenderer) => {
+                this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+        this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
+        builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
+
+        this.prepareToRender(device, viewerInput);
+        this.renderHelper.renderGraph.execute(builder);
+        this.renderInstListMain.reset();
     }
 
     public destroy(device: GfxDevice): void {
-        super.destroy(device);
+        this.renderHelper.destroy();
         this.textureHolder.destroy(device);
         for (let i = 0; i < this.sceneRenderers.length; i++)
             this.sceneRenderers[i].destroy(device);

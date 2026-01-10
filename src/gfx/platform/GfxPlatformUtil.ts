@@ -1,121 +1,63 @@
 
-import { GfxSamplerBinding, GfxBufferBinding, GfxBindingsDescriptor, GfxRenderPipelineDescriptor, GfxBindingLayoutDescriptor, GfxInputLayoutDescriptor, GfxVertexAttributeDescriptor, GfxProgram, GfxMegaStateDescriptor } from './GfxPlatform';
-import { copyMegaState } from '../helpers/GfxMegaStateDescriptorHelpers';
-import { EqualFunc } from '../../HashMap';
+// Copied from toplevel util.ts
 
-export type CopyFunc<T> = (a: T) => T;
-
-export function arrayCopy<T>(a: T[], copyFunc: CopyFunc<T>): T[] {
-    const b = Array(a.length);
-    for (let i = 0; i < a.length; i++)
-        b[i] = copyFunc(a[i]);
-    return b;
+export function assert(b: boolean, message: string = ""): asserts b {
+    if (!b) {
+        console.error(new Error().stack);
+        throw new Error(`Assert fail: ${message}`);
+    }
 }
 
-export function gfxSamplerBindingCopy(a: GfxSamplerBinding): GfxSamplerBinding {
-    const gfxSampler = a.gfxSampler;
-    const gfxTexture = a.gfxTexture;
-    return { gfxSampler, gfxTexture };
+export function assertExists<T>(v: T | null | undefined): T {
+    if (v !== undefined && v !== null)
+        return v;
+    else
+        throw new Error("Missing object");
 }
 
-export function gfxBufferBindingCopy(a: GfxBufferBinding): GfxBufferBinding {
-    const buffer = a.buffer;
-    const wordOffset = a.wordOffset;
-    const wordCount = a.wordCount;
-    return { buffer, wordOffset, wordCount };
+export function range(start: number, count: number): number[] {
+    const L: number[] = [];
+    for (let i = start; i < start + count; i++)
+        L.push(i);
+    return L;
 }
 
-export function gfxBindingsDescriptorCopy(a: GfxBindingsDescriptor): GfxBindingsDescriptor {
-    const bindingLayout = a.bindingLayout;
-    const samplerBindings = arrayCopy(a.samplerBindings, gfxSamplerBindingCopy);
-    const uniformBufferBindings = arrayCopy(a.uniformBufferBindings, gfxBufferBindingCopy);
-    return { bindingLayout, samplerBindings, uniformBufferBindings };
+export function leftPad(S: string, spaces: number, ch: string = '0'): string {
+    return S.padStart(spaces, ch);
 }
 
-export function gfxBindingLayoutDescriptorCopy(a: GfxBindingLayoutDescriptor): GfxBindingLayoutDescriptor {
-    const numSamplers = a.numSamplers;
-    const numUniformBuffers = a.numUniformBuffers;
-    return { numSamplers, numUniformBuffers };
+export function nArray<T>(n: number, c: () => T): T[] {
+    const d = new Array(n);
+    for (let i = 0; i < n; i++)
+        d[i] = c();
+    return d;
 }
 
-export function gfxRenderPipelineDescriptorCopy(a: GfxRenderPipelineDescriptor): GfxRenderPipelineDescriptor {
-    const bindingLayouts = arrayCopy(a.bindingLayouts, gfxBindingLayoutDescriptorCopy);
-    const inputLayout = a.inputLayout;
-    const program = a.program;
-    const topology = a.topology;
-    const megaStateDescriptor = copyMegaState(a.megaStateDescriptor);
-    return { bindingLayouts, inputLayout, megaStateDescriptor, program, topology };
+export function nullify<T>(v: T | undefined | null): T | null {
+    return v === undefined ? null : v;
 }
 
-function arrayEqual<T>(a: T[], b: T[], e: EqualFunc<T>): boolean {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++)
-        if (!e(a[i], b[i]))
-            return false;
-    return true;
+// Requires that multiple is a power of two.
+export function align(n: number, multiple: number): number {
+    const mask = (multiple - 1);
+    return (n + mask) & ~mask;
 }
 
-function gfxBufferBindingEquals(a: GfxBufferBinding, b: GfxBufferBinding): boolean {
-    return a.buffer === b.buffer && a.wordCount === b.wordCount && a.wordOffset === b.wordOffset;
+export function alignNonPowerOfTwo(n: number, multiple: number): number {
+    return (((n + multiple - 1) / multiple) | 0) * multiple;
 }
 
-function gfxSamplerBindingEquals(a: GfxSamplerBinding | null, b: GfxSamplerBinding | null): boolean {
-    if (a === null) return b === null;
-    if (b === null) return false;
-    return a.gfxSampler === b.gfxSampler && a.gfxTexture === b.gfxTexture;
+export function fallbackUndefined<T>(v: T | null | undefined, fallback: T): T {
+    return (v !== null && v !== undefined) ? v : fallback;
 }
 
-export function gfxBindingsDescriptorEquals(a: GfxBindingsDescriptor, b: GfxBindingsDescriptor): boolean {
-    if (a.samplerBindings.length !== b.samplerBindings.length) return false;
-    if (!arrayEqual(a.samplerBindings, b.samplerBindings, gfxSamplerBindingEquals)) return false;
-    if (!arrayEqual(a.uniformBufferBindings, b.uniformBufferBindings, gfxBufferBindingEquals)) return false;
-    if (a.bindingLayout !== b.bindingLayout) return false;
-    return true;
-}
-
-function gfxMegaStateDescriptorEquals(a: GfxMegaStateDescriptor, b: GfxMegaStateDescriptor): boolean {
-    return (
-        a.blendDstFactor === b.blendDstFactor &&
-        a.blendSrcFactor === b.blendSrcFactor &&
-        a.blendMode === b.blendMode &&
-        a.cullMode === b.cullMode &&
-        a.depthCompare === b.depthCompare &&
-        a.depthWrite === b.depthWrite &&
-        a.frontFace === b.frontFace &&
-        a.polygonOffset === b.polygonOffset
-    );
-}
-
-function gfxBindingLayoutEquals(a: GfxBindingLayoutDescriptor, b: GfxBindingLayoutDescriptor): boolean {
-    return a.numSamplers === b.numSamplers && a.numUniformBuffers === b.numUniformBuffers;
-}
-
-function gfxProgramEquals(a: GfxProgram, b: GfxProgram): boolean {
-    return a.ResourceUniqueId === b.ResourceUniqueId;
-}
-
-export function gfxRenderPipelineDescriptorEquals(a: GfxRenderPipelineDescriptor, b: GfxRenderPipelineDescriptor): boolean {
-    if (a.topology !== b.topology) return false;
-    if (a.inputLayout !== b.inputLayout) return false;
-    if (!gfxMegaStateDescriptorEquals(a.megaStateDescriptor, b.megaStateDescriptor)) return false;
-    if (!gfxProgramEquals(a.program, b.program)) return false;
-    if (!arrayEqual(a.bindingLayouts, b.bindingLayouts, gfxBindingLayoutEquals)) return false;
-    return true;
-}
-
-export function gfxVertexAttributeDesciptorEquals(a: GfxVertexAttributeDescriptor, b: GfxVertexAttributeDescriptor): boolean {
-    return (
-        a.bufferIndex === b.bufferIndex &&
-        a.bufferByteOffset === b.bufferByteOffset &&
-        a.location === b.location &&
-        a.format === b.format &&
-        a.frequency === b.frequency &&
-        a.usesIntInShader === b.usesIntInShader
-    );
-}
-
-export function gfxInputLayoutDescriptorEquals(a: GfxInputLayoutDescriptor, b: GfxInputLayoutDescriptor): boolean {
-    if (a.indexBufferFormat !== b.indexBufferFormat) return false;
-    if (!arrayEqual(a.vertexAttributeDescriptors, b.vertexAttributeDescriptors, gfxVertexAttributeDesciptorEquals)) return false;
-    return true;
+export function findall(haystack: string, needle: RegExp): RegExpExecArray[] {
+    const results: RegExpExecArray[] = [];
+    while (true) {
+        const result = needle.exec(haystack);
+        if (!result)
+            break;
+        results.push(result);
+    }
+    return results;
 }

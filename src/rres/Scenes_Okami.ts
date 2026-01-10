@@ -1,23 +1,65 @@
 
-import { GfxDevice, GfxHostAccessPass, GfxRenderPass } from "../gfx/platform/GfxPlatform";
-import * as Viewer from '../viewer';
-import ArrayBufferSlice from "../ArrayBufferSlice";
-import { DataFetcher } from "../DataFetcher";
-import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from "./render";
-import { mat4 } from "gl-matrix";
+import { GfxDevice } from "../gfx/platform/GfxPlatform.js";
+import * as Viewer from '../viewer.js';
+import ArrayBufferSlice from "../ArrayBufferSlice.js";
+import { DataFetcher } from "../DataFetcher.js";
+import { RRESTextureHolder, MDL0Model, MDL0ModelInstance } from "./render.js";
+import { ReadonlyMat4, mat4 } from "gl-matrix";
 
-import * as BRRES from './brres';
-import * as GX from '../gx/gx_enum';
-import { assert, readString, hexzero, assertExists } from "../util";
-import { GXRenderHelperGfx } from "../gx/gx_render";
-import AnimationController from "../AnimationController";
-import { GXMaterialHacks } from "../gx/gx_material";
-import { computeModelMatrixSRT, computeMatrixWithoutRotation } from "../MathHelpers";
-import { computeModelMatrixYBillboard } from "../Camera";
-import { BasicRenderTarget, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderTargetHelpers";
-import { SceneContext } from "../SceneBase";
+import * as BRRES from './brres.js';
+import * as GX from '../gx/gx_enum.js';
+import { assert, readString, hexzero, assertExists } from "../util.js";
+import { GXRenderHelperGfx, fillSceneParamsDataOnTemplate } from "../gx/gx_render.js";
+import AnimationController from "../AnimationController.js";
+import { GXMaterialHacks } from "../gx/gx_material.js";
+import { computeModelMatrixSRT } from "../MathHelpers.js";
+import { CameraController, Camera } from "../Camera.js";
+import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from "../gfx/helpers/RenderGraphHelpers.js";
+import { SceneContext } from "../SceneBase.js";
+import { GfxrAttachmentSlot } from "../gfx/render/GfxRenderGraph.js";
+import { GfxRenderInstList } from "../gfx/render/GfxRenderInstManager.js";
 
-const pathBase = `okami`;
+function computeModelMatrixYBillboard(out: mat4, camera: Camera): void {
+    mat4.identity(out);
+
+    // Right vector
+    out[0] = camera.worldMatrix[0];
+    out[4] = camera.worldMatrix[4];
+    out[8] = camera.worldMatrix[8];
+
+    // Forward vector
+    out[2] = camera.worldMatrix[2];
+    out[6] = camera.worldMatrix[6];
+    out[10] = camera.worldMatrix[10];
+}
+
+function computeMatrixWithoutRotation(dst: mat4, m: ReadonlyMat4): void {
+    const mx = Math.hypot(m[0], m[4], m[8]);
+    const my = Math.hypot(m[1], m[5], m[9]);
+    const mz = Math.hypot(m[2], m[6], m[10]);
+
+    dst[0] = mx;
+    dst[1] = 0.0;
+    dst[2] = 0.0;
+    dst[3] = 0.0;
+
+    dst[4] = 0.0;
+    dst[5] = my;
+    dst[6] = 0.0;
+    dst[7] = 0.0;
+
+    dst[8] = 0.0;
+    dst[9] = 0.0;
+    dst[10] = mz;
+    dst[11] = 0.0;
+
+    dst[12] = m[12];
+    dst[13] = m[13];
+    dst[14] = m[14];
+    dst[15] = 1.0;
+}
+
+const pathBase = `Okami`;
 
 interface FileEntry {
     filename: string;
@@ -78,6 +120,9 @@ interface SCR {
 
 class MapPartInstance {
     private animationController = new AnimationController();
+    public visible = true;
+    public transS = 0.0;
+    public transT = 0.0;
 
     constructor(private scrMapEntry: SCREntry, private modelMatrix: mat4, private modelInstance: MDL0ModelInstance) {
         mat4.copy(this.modelInstance.modelMatrix, this.modelMatrix);
@@ -87,6 +132,9 @@ class MapPartInstance {
     }
 
     public prepareToRender(device: GfxDevice, renderHelper: GXRenderHelperGfx, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible)
+            return;
+
         this.animationController.setTimeInMilliseconds(viewerInput.time);
 
         const frames = this.animationController.getTimeInFrames();
@@ -108,19 +156,18 @@ class MapPartInstance {
         }
 
         const dst = this.modelInstance.materialInstances[0].materialData.material.texSrts[0].srtMtx;
-        dst[12] = transS;
-        dst[13] = transT;
+        dst[12] = transS + this.transS;
+        dst[13] = transT + this.transT;
 
         if (!!(this.scrMapEntry.flags_08 & 0x03)) {
             computeModelMatrixYBillboard(this.modelInstance.modelMatrix, viewerInput.camera);
             mat4.mul(this.modelInstance.modelMatrix, this.modelMatrix, this.modelInstance.modelMatrix);
         }
 
-        this.modelInstance.prepareToRender(device, renderHelper, viewerInput);
+        this.modelInstance.prepareToRender(device, renderHelper.renderInstManager, viewerInput);
     }
 
     public destroy(device: GfxDevice): void {
-        this.modelInstance.destroy(device);
     }
 }
 
@@ -246,8 +293,6 @@ class ModelCache {
 }
 
 export class OkamiRenderer implements Viewer.SceneGfx {
-    public renderTarget = new BasicRenderTarget();
-
     public mapPartInstances: MapPartInstance[] = [];
     public objectInstances: ObjectInstance[] = [];
     public models: MDL0Model[] = [];
@@ -255,43 +300,59 @@ export class OkamiRenderer implements Viewer.SceneGfx {
     public animationController = new AnimationController();
     public textureHolder = new RRESTextureHolder();
     public renderHelper: GXRenderHelperGfx;
+    private renderInstListMain = new GfxRenderInstList();
 
     constructor(device: GfxDevice) {
         this.renderHelper = new GXRenderHelperGfx(device);
     }
+    
+    public adjustCameraController(c: CameraController) {
+        c.setSceneMoveSpeedMult(8/60);
+    }
 
-    protected prepareToRender(device: GfxDevice, hostAccessPass: GfxHostAccessPass, viewerInput: Viewer.ViewerRenderInput): void {
+    protected prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
         const template = this.renderHelper.pushTemplateRenderInst();
 
         this.animationController.setTimeInMilliseconds(viewerInput.time);
 
-        this.renderHelper.fillSceneParams(viewerInput, template);
+        fillSceneParamsDataOnTemplate(template, viewerInput);
+        this.renderHelper.renderInstManager.setCurrentList(this.renderInstListMain);
         for (let i = 0; i < this.mapPartInstances.length; i++)
             this.mapPartInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
         for (let i = 0; i < this.objectInstances.length; i++)
             this.objectInstances[i].prepareToRender(device, this.renderHelper, viewerInput);
-        this.renderHelper.prepareToRender(device, hostAccessPass);
-        this.renderHelper.renderInstManager.popTemplateRenderInst();
+        this.renderHelper.prepareToRender();
+        this.renderHelper.renderInstManager.popTemplate();
     }
 
-    public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): GfxRenderPass {
-        const hostAccessPass = device.createHostAccessPass();
-        this.prepareToRender(device, hostAccessPass, viewerInput);
-        device.submitPass(hostAccessPass);
-
+    public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput) {
         const renderInstManager = this.renderHelper.renderInstManager;
-        this.renderTarget.setParameters(device, viewerInput.viewportWidth, viewerInput.viewportHeight);
-        const passRenderer = this.renderTarget.createRenderPass(device, standardFullClearRenderPassDescriptor);
-        passRenderer.setViewport(viewerInput.viewportWidth, viewerInput.viewportHeight);
-        renderInstManager.drawOnPassRenderer(device, passRenderer);
-        renderInstManager.resetRenderInsts();
-        return passRenderer;
+        const builder = this.renderHelper.renderGraph.newGraphBuilder();
+
+        const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
+
+        const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
+        const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
+        builder.pushPass((pass) => {
+            pass.setDebugName('Main');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
+            pass.exec((passRenderer) => {
+                this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+        this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
+        builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
+
+        this.prepareToRender(device, viewerInput);
+        this.renderHelper.renderGraph.execute(builder);
+        this.renderInstListMain.reset();
     }
 
     public destroy(device: GfxDevice): void {
-        this.renderTarget.destroy(device);
         this.textureHolder.destroy(device);
-        this.renderHelper.destroy(device);
+        this.renderHelper.destroy();
         for (let i = 0; i < this.models.length; i++)
             this.models[i].destroy(device);
         for (let i = 0; i < this.mapPartInstances.length; i++)
@@ -321,7 +382,7 @@ const materialHacks: GXMaterialHacks = {
     ];
 */
 
-const enum OkamiPass {
+enum OkamiPass {
     SKYBOX = 1 << 0,
     GROUND = 1 << 1,
     WATER = 1 << 2,
@@ -331,9 +392,9 @@ const enum OkamiPass {
 function patchMaterialSetAlpha(material: BRRES.MDL0_MaterialEntry, alpha: number): void {
     if (alpha === 0x44) {
         // 0x44; SrcA*Src + (1.0-SrcA)*Dst
-        material.gxMaterial.ropInfo.blendMode.type = GX.BlendMode.BLEND;
-        material.gxMaterial.ropInfo.blendMode.srcFactor = GX.BlendFactor.SRCALPHA;
-        material.gxMaterial.ropInfo.blendMode.dstFactor = GX.BlendFactor.INVSRCALPHA;
+        material.gxMaterial.ropInfo.blendMode = GX.BlendMode.BLEND;
+        material.gxMaterial.ropInfo.blendSrcFactor = GX.BlendFactor.SRCALPHA;
+        material.gxMaterial.ropInfo.blendDstFactor = GX.BlendFactor.INVSRCALPHA;
     } else {
         // TODO(jstpierre): Rest of them.
         throw "whoops";
@@ -568,6 +629,7 @@ function shouldBillboard(objectTypeId: number, objectId: number): boolean {
 
 class ObjectInstance {
     private shouldBillboard: boolean;
+    private visible = true;
 
     constructor(private objectTypeId: number, private objectId: number, private modelMatrix: mat4, private modelInstance: MDL0ModelInstance) {
         this.shouldBillboard = shouldBillboard(this.objectTypeId, this.objectId);
@@ -579,16 +641,18 @@ class ObjectInstance {
     }
 
     public prepareToRender(device: GfxDevice, renderHelper: GXRenderHelperGfx, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible)
+            return;
+
         if (this.shouldBillboard) {
             computeModelMatrixYBillboard(this.modelInstance.modelMatrix, viewerInput.camera);
             mat4.mul(this.modelInstance.modelMatrix, this.modelMatrix, this.modelInstance.modelMatrix);
         }
 
-        this.modelInstance.prepareToRender(device, renderHelper, viewerInput);
+        this.modelInstance.prepareToRender(device, renderHelper.renderInstManager, viewerInput);
     }
 
     public destroy(device: GfxDevice): void {
-        this.modelInstance.destroy(device);
     }
 }
 
@@ -750,7 +814,7 @@ class OkamiSceneDesc implements Viewer.SceneDesc {
             const tscTableFile = datArc.files.find((file) => file.type === 'TSC')!;
             this.spawnObjectTable(device, renderer, modelCache, tscTableFile.buffer);
 
-            const treTableFile = datArc.files.find((file) => file.type === 'TRE');
+            const treTableFile = datArc.files.find((file) => file.type === 'TRE')!;
             this.spawnObjectTable(device, renderer, modelCache, treTableFile.buffer);
 
             return modelCache.waitForLoad().then(() => {
@@ -762,7 +826,7 @@ class OkamiSceneDesc implements Viewer.SceneDesc {
 
 const id = 'okami';
 const name = 'Okami';
-// Courses organized by Instant Grat (@instant_grat)
+// Courses organized by Instant Grat (@instant_grat) and EruditeWho (@EruditeWhy)
 const sceneDescs = [
     new OkamiSceneDesc('r122', 'River of the Heavens - Area 1'),
     new OkamiSceneDesc('r101', 'River of the Heavens - Area 2'),
@@ -776,10 +840,10 @@ const sceneDescs = [
     new OkamiSceneDesc('r108', 'Kusa Village'),
     new OkamiSceneDesc('r109', 'Sasa Sanctuary - Exterior'),
     new OkamiSceneDesc('r10a', "Madame Fawn's House"),
-    new OkamiSceneDesc('r10b', "r10b"),
+    // new OkamiSceneDesc('r10b', "r10b"),
     new OkamiSceneDesc('r10c', "Onigiri-Sensei's Dojo"),
-    new OkamiSceneDesc('r10d', "r10d"),
-    new OkamiSceneDesc('r10e', 'r10e'),
+    new OkamiSceneDesc('r10d', "Gale Shrine - Crimson Helm Arena"),
+    new OkamiSceneDesc('r10e', "Moon Cave - Calcified Cavern"),
     new OkamiSceneDesc('r110', 'Moon Cave'),
     new OkamiSceneDesc('r111', 'Moon Cave - Orochi Arena'),
     new OkamiSceneDesc('r112', 'Kamiki Village'),
@@ -791,67 +855,64 @@ const sceneDescs = [
     new OkamiSceneDesc('r119', 'Divine Spring 6'),
     new OkamiSceneDesc('r11c', 'Divine Spring 7'),
     new OkamiSceneDesc('r11d', 'Divine Spring 8'),
-    new OkamiSceneDesc('r113', 'Tsuta Ruins - Spider Queen Arena (Refight?)'),
-    new OkamiSceneDesc('r11a', 'Spider Queen Arena (Again?)'),
-    new OkamiSceneDesc('r11b', 'Spider Queen Arena (Really?)'),
+    new OkamiSceneDesc('r113', 'Bandit Spider and Devil Gate Arena 1'),
+    new OkamiSceneDesc('r11a', 'Bandit Spider and Devil Gate Arena 2'),
+    new OkamiSceneDesc('r11b', 'Bandit Spider and Devil Gate Arena 3'),
     new OkamiSceneDesc('r120', 'Moon Cave - Orochi Arena (No Bell)'),
-    new OkamiSceneDesc('r200', "Sei-An City - Arisocratic Quarter"),
-    new OkamiSceneDesc('r201', "Sei-An City - Commoner's Quarter"),
+    new OkamiSceneDesc('r200', "Sei'an City - Arisocratic Quarter (Cursed)"),
+    new OkamiSceneDesc('r201', "Sei'an City - Commoner's Quarter"),
     new OkamiSceneDesc('r202', "Himiko Palace"),
     new OkamiSceneDesc('r203', "Dragon Palace - Exterior"),
     new OkamiSceneDesc('r204', "Inside the Water Dragon - Area 1"),
-    new OkamiSceneDesc('r205', 'r205'),
-    new OkamiSceneDesc('r206', 'r206'),
-    new OkamiSceneDesc('r207', 'r207'),
-    new OkamiSceneDesc('r208', 'r208'),
-    new OkamiSceneDesc('r209', 'r209'),
-    new OkamiSceneDesc('r20a', 'r20a'),
-    new OkamiSceneDesc('r20b', 'r20b'),
-    new OkamiSceneDesc('r20c', 'r20c'),
-    new OkamiSceneDesc('r20d', 'r20d'),
-    new OkamiSceneDesc('r20e', 'r20e'),
-    new OkamiSceneDesc('r20f', 'r20f'),
-    new OkamiSceneDesc('r301', 'r301'),
-    new OkamiSceneDesc('r302', 'r302'),
-    new OkamiSceneDesc('r303', 'r303'),
-    new OkamiSceneDesc('r304', 'r304'),
-    new OkamiSceneDesc('r305', 'r305'),
-    new OkamiSceneDesc('r306', 'r306'),
-    new OkamiSceneDesc('r307', 'r307'),
-    new OkamiSceneDesc('r308', 'r308'),
-    new OkamiSceneDesc('r309', 'r309'),
-    new OkamiSceneDesc('r30a', 'r30a'),
-    new OkamiSceneDesc('r30b', 'r30b'),
-    new OkamiSceneDesc('r30c', 'r30c'),
-    new OkamiSceneDesc('r30d', 'r30d'),
-    new OkamiSceneDesc('r310', 'r310'),
-    new OkamiSceneDesc('r311', 'r311'),
-    new OkamiSceneDesc('r312', 'r312'),
-    new OkamiSceneDesc('r313', 'r313'),
-    new OkamiSceneDesc('r314', 'r314'),
-    new OkamiSceneDesc('rc00', 'rc00'),
-    new OkamiSceneDesc('rc02', 'rc02'),
-    new OkamiSceneDesc('re00', 're00'),
-    new OkamiSceneDesc('re01', 're01'),
-    new OkamiSceneDesc('re02', 're02'),
-    new OkamiSceneDesc('re03', 're03'),
-    new OkamiSceneDesc('re04', 're04'),
-    new OkamiSceneDesc('rf01', 'rf01'),
-    new OkamiSceneDesc('rf02', 'rf02'),
-    new OkamiSceneDesc('rf03', 'rf03'),
-    new OkamiSceneDesc('rf04', 'rf04'),
-    new OkamiSceneDesc('rf06', 'rf06'),
-    new OkamiSceneDesc('rf07', 'rf07'),
-    new OkamiSceneDesc('rf08', 'rf08'),
-    new OkamiSceneDesc('rf09', 'rf09'),
-    new OkamiSceneDesc('rf0a', 'rf0a'),
-    new OkamiSceneDesc('rf0c', 'rf0c'),
-    new OkamiSceneDesc('rf10', 'rf10'),
-    new OkamiSceneDesc('rf11', 'rf11'),
-    new OkamiSceneDesc('rf12', 'rf12'),
-    new OkamiSceneDesc('rf13', 'rf13'),
-    new OkamiSceneDesc('rf20', 'rf20'),
-    new OkamiSceneDesc('rf21', 'rf21'),
+    new OkamiSceneDesc('r205', "Sunken Ship"),
+    new OkamiSceneDesc('r206', "Emperor's Palace - Area 1"),
+    new OkamiSceneDesc('r207', "Emperor's Palace - Area 2"),
+    new OkamiSceneDesc('r208', "Oni Island - Area 1"),
+    new OkamiSceneDesc('r209', "Oni Island - Ninetails Arena"),
+    new OkamiSceneDesc('r20a', "Catcall Tower"),
+    new OkamiSceneDesc('r20b', "Emperor's Body - Blight Arena"),
+    new OkamiSceneDesc('r20d', "Oni Island - Exterior Area"),
+    new OkamiSceneDesc('r20e', "Oni Island - Area 3"),
+    new OkamiSceneDesc('r20f', "Oni Island - Area 2"),
+    new OkamiSceneDesc('r301', "Wep'keer"),
+    new OkamiSceneDesc('r302', "Kamiki Village (Spirit Gate)"),
+    new OkamiSceneDesc('r303', "Wawku Shrine"),
+    new OkamiSceneDesc('r304', "Wawku Shrine - Lechku & Nechku Arena 2"),
+    new OkamiSceneDesc('r305', "Ponc'tan"),
+    new OkamiSceneDesc('r306', "Moon Cave - True Orochi Arena"),
+    new OkamiSceneDesc('r307', "Ark of Yamato - Interior Hub"),
+    new OkamiSceneDesc('r308', "Ark of Yamato - Spider Queen Arena"),
+    new OkamiSceneDesc('r309', "Ark of Yamato - True Orochi Arena"),
+    new OkamiSceneDesc('r30a', "Ark of Yamato - Blight Arena"),
+    new OkamiSceneDesc('r30b', "Ark of Yamato - Ninetails Arena"),
+    new OkamiSceneDesc('r30c', "Ark of Yamato - Crimson Helm Arena"),
+    new OkamiSceneDesc('r30d', "Ponc'tan - Mrs. Seal's House"),
+    new OkamiSceneDesc('r310', "Yoshpet"),
+    new OkamiSceneDesc('r311', "Inner Yoshpet"),
+    new OkamiSceneDesc('r312', "Ark of Yamato - Yami Arena"),
+    new OkamiSceneDesc('r313', "Wep'keer - Snowball Playground"),
+    new OkamiSceneDesc('r314', "Wawku Shrine - Lechku & Nechku Arena 1"),
+    new OkamiSceneDesc('rf01', "Shinshu Field (Cursed)"),
+    new OkamiSceneDesc('rf02', "Shinshu Field"),
+    new OkamiSceneDesc('rf03', "Agata Forest (Cursed)"),
+    new OkamiSceneDesc('rf04', "Agata Forest"),
+    new OkamiSceneDesc('rf06', "Moon Cave (Exterior, Cursed)"),
+    new OkamiSceneDesc('rf07', "Taka Pass (Cursed)"),
+    new OkamiSceneDesc('rf08', "Taka Pass"),
+    new OkamiSceneDesc('rf09', "South Ryoshima Coast (Cursed)"),
+    new OkamiSceneDesc('rf0a', "South Ryoshima Coast"),
+    new OkamiSceneDesc('rf0c', "North Ryoshima Coast (Oni Island Entrance)"),
+    new OkamiSceneDesc('rf10', "Kamui (Beta Version)"),
+    new OkamiSceneDesc('rf11', "Kamui (Cursed)"),
+    new OkamiSceneDesc('rf12', "Kamui"),
+    new OkamiSceneDesc('rf13', "Kamui (Ezofuji)"),
+    new OkamiSceneDesc('rf20', "Shinshu Field (Spirit Gate)"),
+    new OkamiSceneDesc('rf21', "Moon Cave (Exterior, Cursed, Less Wind)"),
+    new OkamiSceneDesc('re00', "Ending Credits: Sei'an City - Gojo Bridge"),
+    new OkamiSceneDesc('re01', "Ending Credits: Sei'an City - Aristocratic Quarter"),
+    new OkamiSceneDesc('re02', "Ending Credits: Agata Forest"),
+    new OkamiSceneDesc('re03', "Ending Credits: Kamui"),
+    new OkamiSceneDesc('re04', "Ending Credits: North Ryoshima Coast"),
 ];
 
 export const sceneGroup: Viewer.SceneGroup = { id, name, sceneDescs };

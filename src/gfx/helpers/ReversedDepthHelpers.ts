@@ -1,24 +1,31 @@
 
+// Reversed depth support
+
 import { mat4 } from "gl-matrix";
-import { GfxCompareMode } from "../platform/GfxPlatform";
+import { GfxCompareMode } from "../platform/GfxPlatform.js";
 
-// Utilities for depth reversal
-const IS_DEPTH_REVERSED = true;
+export const IsDepthReversed = true;
 
-export function reverseDepthForProjectionMatrix(m: mat4, isDepthReversed = IS_DEPTH_REVERSED): void {
-    if (isDepthReversed) {
-        m[10] = -m[10] - 1;
-        m[14] = -m[14];
-    }
+// This is designed for an OpenGL-style clip space, because we apply the clip space transform after...
+const reverseDepthMatrix = mat4.fromValues(
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, -1, 0,
+    0, 0, 0, 1,
+);
+
+export function projectionMatrixReverseDepth(m: mat4, isDepthReversed = IsDepthReversed): void {
+    if (isDepthReversed)
+        mat4.mul(m, reverseDepthMatrix, m);
 }
 
-export function reverseDepthForCompareMode(compareMode: GfxCompareMode, isDepthReversed = IS_DEPTH_REVERSED): GfxCompareMode {
+export function reverseDepthForCompareMode(compareMode: GfxCompareMode, isDepthReversed = IsDepthReversed): GfxCompareMode {
     if (isDepthReversed) {
         switch (compareMode) {
-        case GfxCompareMode.LESS:    return GfxCompareMode.GREATER;
-        case GfxCompareMode.LEQUAL:  return GfxCompareMode.GEQUAL;
-        case GfxCompareMode.GEQUAL:  return GfxCompareMode.LEQUAL;
-        case GfxCompareMode.GREATER: return GfxCompareMode.LESS;
+        case GfxCompareMode.Less:    return GfxCompareMode.Greater;
+        case GfxCompareMode.LessEqual:  return GfxCompareMode.GreaterEqual;
+        case GfxCompareMode.GreaterEqual:  return GfxCompareMode.LessEqual;
+        case GfxCompareMode.Greater: return GfxCompareMode.Less;
         default: return compareMode;
         }
     } else {
@@ -26,10 +33,32 @@ export function reverseDepthForCompareMode(compareMode: GfxCompareMode, isDepthR
     }
 }
 
-export function reverseDepthForClearValue(n: number, isDepthReversed = IS_DEPTH_REVERSED): number {
+export function reverseDepthForClearValue(n: number, isDepthReversed = IsDepthReversed): number {
     if (isDepthReversed) {
         return 1.0 - n;
     } else {
         return n;
     }
+}
+
+export function reverseDepthForDepthOffset(n: number, isDepthReversed = IsDepthReversed): number {
+    if (isDepthReversed) {
+        return -n;
+    } else {
+        return n;
+    }
+}
+
+export function compareDepthValues(a: number, b: number, op: GfxCompareMode, isDepthReversed = IsDepthReversed): boolean {
+    op = reverseDepthForCompareMode(op, isDepthReversed);
+    if (op === GfxCompareMode.Less)
+        return a < b;
+    else if (op === GfxCompareMode.LessEqual)
+        return a <= b;
+    else if (op === GfxCompareMode.Greater)
+        return a > b;
+    else if (op === GfxCompareMode.GreaterEqual)
+        return a >= b;
+    else
+        throw "whoops";
 }
